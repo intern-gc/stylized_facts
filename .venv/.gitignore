@@ -1,0 +1,21 @@
+
+# Byte-compiled / C extensions
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Venvs
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+
+# Secrets
+.env
+
+# OS
+.DS_Store
+Thumbs.db
