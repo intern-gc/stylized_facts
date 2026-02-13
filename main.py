@@ -85,14 +85,22 @@ def run_analysis():
         print("❌ FACT 3 (Volatility Clustering): NOT DETECTED")
 
     # Report Fact 4
+    # H0: Extreme moves behave identically to normal market moves
+    # (i.e., tail loss rate = body loss rate for the same time period)
     if gl_result:
         loss_pct = gl_result['loss_pct']
+        body_pct = gl_result['body_loss_pct']
         n_extreme = gl_result['n_extreme']
         pval = gl_result['pvalue']
+        z = gl_result['z_stat']
+        alt = gl_result['alternative']
         if pval < 0.05:
-            print(f"✅ FACT 4 (Gain/Loss Asymmetry): CONFIRMED (p={pval:.4f}, Losses={loss_pct:.1f}% of {n_extreme} extreme returns)")
+            print(f"✅ FACT 4 (Gain/Loss Asymmetry): CONFIRMED (p={pval:.4f}, z={z:.2f}, {alt})")
         else:
-            print(f"❌ FACT 4 (Gain/Loss Asymmetry): NOT SIGNIFICANT (p={pval:.4f}, Losses={loss_pct:.1f}%)")
+            print(f"❌ FACT 4 (Gain/Loss Asymmetry): NOT SIGNIFICANT (p={pval:.4f}, z={z:.2f})")
+        print(f"   -> H0: Extreme moves behave identically to normal market moves")
+        print(f"   -> Tail loss rate: {loss_pct:.1f}% ({n_extreme} extreme returns)")
+        print(f"   -> Body loss rate: {body_pct:.1f}% (null hypothesis baseline)")
         if gl_result['avg_loss'] is not None:
             print(f"   -> Avg extreme loss:    {gl_result['avg_loss']:.6f}  |  Median: {gl_result['median_loss']:.6f}")
         if gl_result['avg_gain'] is not None:

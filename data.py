@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import numpy as np
+import concurrent.futures
 from datetime import datetime, timedelta, time
 from dotenv import load_dotenv
 
@@ -21,105 +22,104 @@ class DataManager:
             os.makedirs(self.cache_dir)
 
     def _get_alpaca_tf(self, interval):
-        """Maps any string interval to Alpaca TimeFrame objects."""
-        mapping = {
-            '1m': TimeFrame.Minute,
-            '5m': TimeFrame(5, TimeFrame.Minute),
-            '1h': TimeFrame.Hour,
-            '1d': TimeFrame.Day
-        }
+        mapping = {'1m': TimeFrame.Minute, '5m': TimeFrame(5, TimeFrame.Minute), '1h': TimeFrame.Hour,
+                   '1d': TimeFrame.Day}
         return mapping.get(interval, TimeFrame.Minute)
 
-    def get_data(self, ticker, start_date, end_date, interval):
+    def get_data(self, ticker, start_date, end_date, interval, force_resync=False):
         yesterday = (datetime.now() - timedelta(days=1)).date()
         req_start = datetime.strptime(start_date, '%Y-%m-%d').date()
         req_end = min(datetime.strptime(end_date, '%Y-%m-%d').date(), yesterday)
-
         business_days = pd.bdate_range(start=req_start, end=req_end)
-        stitched_dfs = []
 
-        print(f"\n🚀 [STARTING SYNC]: {ticker} | {interval} | {len(business_days)} potential days")
+        needed_files = {day: f"{day.strftime('%y%m%d')}_{interval}_{ticker}.pkl" for day in business_days}
 
-        for day in business_days:
-            # Filename is unique to interval to prevent cache collisions
-            file_name = f"{day.strftime('%y%m%d')}_{interval}_{ticker}.pkl"
-            file_path = os.path.join(self.cache_dir, file_name)
+        # If force_resync is True, we ignore existing files
+        if force_resync:
+            print(f"  🔄 FORCE RESYNC: Ignoring cache for {ticker}...")
+            missing_days = list(business_days)
+        else:
+            missing_days = [day for day, fname in needed_files.items() if
+                            not os.path.exists(os.path.join(self.cache_dir, fname))]
 
-            if os.path.exists(file_path):
-                print(f"  💾 CACHE HIT: {day.strftime('%Y-%m-%d')}")
-                day_df = pd.read_pickle(file_path)
-            else:
-                print(f"  🌐 API FETCH: {day.strftime('%Y-%m-%d')}...", end="\r")
-                request_params = StockBarsRequest(
-                    symbol_or_symbols=ticker,
-                    timeframe=self._get_alpaca_tf(interval),
-                    start=datetime.combine(day, time(0, 0)),
-                    end=datetime.combine(day, time(23, 59)),
-                    feed="sip"
-                )
+        if missing_days:
+            fetch_start = min(missing_days)
+            fetch_end = max(missing_days)
+            print(f"  🌐 API BATCH FETCH: {ticker} ({fetch_start} to {fetch_end})...")
+
+            request_params = StockBarsRequest(
+                symbol_or_symbols=ticker,
+                timeframe=self._get_alpaca_tf(interval),
+                start=datetime.combine(fetch_start, time(0, 0)),
+                end=datetime.combine(fetch_end, time(23, 59)),
+                feed="sip"
+            )
+
+            try:
                 bars = self.client.get_stock_bars(request_params)
+                days_received = set()
 
-                if not bars.data:
-                    print(f"  ⚠️  SKIP (HOLIDAY/NO DATA): {day.strftime('%Y-%m-%d')}     ")
-                    continue
+                if bars.data and not bars.df.empty:
+                    df_all = bars.df
+                    if isinstance(df_all.index, pd.MultiIndex):
+                        df_all = df_all.xs(ticker, level=0)
 
-                day_df = bars.df
-                if isinstance(day_df.index, pd.MultiIndex):
-                    day_df = day_df.xs(ticker, level=0)
+                    df_all = df_all.rename(
+                        columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
 
-                day_df = day_df.rename(
-                    columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
-                day_df.to_pickle(file_path)
-                print(f"  ✅ API SUCCESS: {day.strftime('%Y-%m-%d')} ({len(day_df)} bars)")
+                    for day_ts, group in df_all.groupby(df_all.index.date):
+                        day_fname = f"{day_ts.strftime('%y%m%d')}_{interval}_{ticker}.pkl"
+                        group.to_pickle(os.path.join(self.cache_dir, day_fname))
+                        days_received.add(day_ts)
 
-            # Frequency-specific cleaning
-            if not day_df.empty:
-                if interval in ['1m', '5m']:
-                    # Reindex for intraday micro-gaps only
-                    freq_map = {'1m': '1min', '5m': '5min'}
-                    full_range = pd.date_range(start=day_df.index.min(), end=day_df.index.max(),
-                                               freq=freq_map[interval])
-                    day_df = day_df.reindex(full_range).ffill()
-                    day_df['Volume'] = day_df['Volume'].fillna(0)
-                stitched_dfs.append(day_df)
+                # Only mark as empty if we actually got a successful response from the API
+                # and that specific day was simply not in the result.
+                for m_day in missing_days:
+                    if m_day not in days_received:
+                        empty_fname = f"{m_day.strftime('%y%m%d')}_{interval}_{ticker}.pkl"
+                        pd.DataFrame().to_pickle(os.path.join(self.cache_dir, empty_fname))
 
+                print(f"  ✅ BATCH SYNC COMPLETE.")
+            except Exception as e:
+                print(f"  ❌ API ERROR: {e}. Not marking days as empty.")
+
+        # Parallel load
+        def load_pkl(day):
+            fpath = os.path.join(self.cache_dir, needed_files[day])
+            if os.path.exists(fpath):
+                df = pd.read_pickle(fpath)
+                return None if df.empty else df
+            return None
+
+        print(f"  💾 LOADING {ticker} CACHE...")
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            results = list(executor.map(load_pkl, business_days))
+
+        stitched_dfs = [df for df in results if df is not None]
         if not stitched_dfs:
-            # FIXED: Must return 3 values to match unpacking in main.py
-            return pd.DataFrame(), pd.Series(), "❌ NO DATA FOUND"
+            return pd.DataFrame(), pd.Series(), "❌ NO DATA"
 
         full_df = pd.concat(stitched_dfs).sort_index()
-
-        # Timezone Logic
-        if full_df.index.tz is None:
-            full_df.index = full_df.index.tz_localize('UTC')
+        if full_df.index.tz is None: full_df.index = full_df.index.tz_localize('UTC')
         full_df = full_df.tz_convert('US/Eastern')
-
-        # Filter Market Hours ONLY for intraday timeframes
-        if interval != '1d':
-            print(f"  🕒 Filtering for 09:30-16:00 EST...")
-            full_df = full_df.between_time('09:30', '16:00')
+        if interval != '1d': full_df = full_df.between_time('09:30', '16:00')
+        full_df = full_df[~full_df.index.duplicated(keep='first')]
 
         return self.audit_and_clean(full_df, interval)
 
     def audit_and_clean(self, df, interval):
+        # ... (keep your existing audit_and_clean code here)
         if df.empty: return df, pd.Series(), "❌ ERROR: No data"
-
         c_df = df.copy()
-        # Centralized Log Return Calculation
         returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
-
         issues = []
         if interval in ['1m', '5m']:
             std = returns.std()
-            # Repair V-Spikes using pre-calculated returns
-            spike_idx = np.where((np.abs(returns) > 5.0 * std) &
-                                 (np.abs(np.roll(returns, -1) + returns) < std))[0]
+            spike_idx = np.where((np.abs(returns) > 5.0 * std) & (np.abs(np.roll(returns, -1) + returns) < std))[0]
             if len(spike_idx) > 0:
                 c_df.iloc[spike_idx] = np.nan
                 c_df = c_df.ffill()
-                # Recalculate returns only if a repair happened
                 returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
                 issues.append(f"REPAIRED: {len(spike_idx)} V-Spikes")
-
         report = "✅ DATA CLEAN" if not issues else " | ".join(issues)
         return c_df, returns, report

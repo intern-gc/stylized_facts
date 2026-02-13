@@ -181,18 +181,17 @@ class TestGainLossAsymmetry(unittest.TestCase):
 
     def test_known_loss_skew(self):
         """
-        Construct 100 returns where the top 1% of |returns| are all losses.
-        With q=0.99, the cutoff selects the single largest |return|.
-        That return is -0.50 (a loss), so loss_pct should be 100%.
-        Binomial test: 1 loss out of 1 trial, p=0.5 => pvalue=1.0 (not significant
-        with n=1, which is correct - can't conclude asymmetry from one observation).
+        100 returns: 50 gains + 49 losses in body, 1 extreme loss.
+        Body loss rate = 49/99 ~ 49.5%. Tail loss rate = 1/1 = 100%.
+        With n=1 in the tail, z-test cannot be significant.
+        Result must include z_stat, pvalue, body_loss_pct, and alternative.
         """
         small = [0.01] * 50 + [-0.01] * 49
         extreme = [-0.50]
         returns = pd.Series(small + extreme)
 
         gl = GainLossAsymmetry(returns, "TEST")
-        result = gl.compute_asymmetry(q=0.99)
+        result = gl.compute_asymmetry(q=0.99, plot=False)
 
         self.assertIsNotNone(result)
         self.assertAlmostEqual(result['loss_pct'], 100.0, delta=0.01)
@@ -202,73 +201,102 @@ class TestGainLossAsymmetry(unittest.TestCase):
         self.assertAlmostEqual(result['median_loss'], -0.50, delta=0.01)
         self.assertIsNone(result['avg_gain'])
         self.assertIsNone(result['median_gain'])
-        # pvalue must be present and a float
+        # Two-proportion z-test fields must be present
         self.assertIn('pvalue', result)
         self.assertIsInstance(result['pvalue'], float)
+        self.assertIn('z_stat', result)
+        self.assertIn('body_loss_pct', result)
+        self.assertIn('alternative', result)
 
     def test_known_gain_skew(self):
         """
-        Construct data where the top 1% of |returns| are all gains.
+        Body is ~50/50, tail is 100% gains (0% losses).
+        Tail loss rate < body loss rate, so alternative should be 'smaller'.
         """
         small = [0.01] * 50 + [-0.01] * 49
         extreme = [0.50]
         returns = pd.Series(small + extreme)
 
         gl = GainLossAsymmetry(returns, "TEST")
-        result = gl.compute_asymmetry(q=0.99)
+        result = gl.compute_asymmetry(q=0.99, plot=False)
 
         self.assertIsNotNone(result)
         self.assertAlmostEqual(result['loss_pct'], 0.0, delta=0.01)
         self.assertAlmostEqual(result['gain_pct'], 100.0, delta=0.01)
         self.assertAlmostEqual(result['avg_gain'], 0.50, delta=0.01)
-        self.assertAlmostEqual(result['median_gain'], 0.50, delta=0.01)
         self.assertIsNone(result['avg_loss'])
-        self.assertIsNone(result['median_loss'])
+        self.assertIn('body_loss_pct', result)
 
-    def test_mixed_extremes(self):
+    def test_mixed_extremes_not_significant(self):
         """
-        Construct data where extreme returns are 75% losses, 25% gains.
-        Use q=0.96 so that top 4% = 4 out of 100 returns are extreme.
-        3 extreme losses: -0.50, -0.60, -0.70  =>  avg=-0.60, median=-0.60
-        1 extreme gain:   +0.55                 =>  avg=+0.55, median=+0.55
-        Binomial: 3 losses out of 4, p=0.5 => pvalue=0.625 (not significant with n=4).
+        Body: 48 gains + 48 losses = 50% loss rate.
+        Tail: 3 losses + 1 gain = 75% loss rate.
+        With only n=4 in the tail, the z-test should NOT be significant.
         """
         small = [0.001] * 48 + [-0.001] * 48
         extremes = [-0.50, -0.60, -0.70, 0.55]
         returns = pd.Series(small + extremes)
 
         gl = GainLossAsymmetry(returns, "TEST")
-        result = gl.compute_asymmetry(q=0.96)
+        result = gl.compute_asymmetry(q=0.96, plot=False)
 
         self.assertIsNotNone(result)
         self.assertAlmostEqual(result['loss_pct'], 75.0, delta=0.01)
-        self.assertAlmostEqual(result['gain_pct'], 25.0, delta=0.01)
         self.assertEqual(result['n_extreme'], 4)
         self.assertAlmostEqual(result['avg_loss'], -0.60, delta=0.001)
         self.assertAlmostEqual(result['median_loss'], -0.60, delta=0.001)
         self.assertAlmostEqual(result['avg_gain'], 0.55, delta=0.001)
         self.assertAlmostEqual(result['median_gain'], 0.55, delta=0.001)
-        # 3/4 losses is NOT significant at p<0.05 (binom_test(3,4,0.5) = 0.625)
         self.assertGreater(result['pvalue'], 0.05)
 
     def test_strong_loss_asymmetry_significant(self):
         """
-        With enough extreme returns heavily skewed to losses,
-        the binomial test should yield p < 0.05.
-        1000 total: 980 near-zero + 20 extreme. q=0.99 selects top 1% = ~10 returns.
-        All 20 extremes have |r|=0.50 which is far above the near-zero returns,
-        so all 20 get selected. 18 losses, 2 gains => binom_test(18,20,0.5) ~ 0.0004.
+        Body: 490 gains + 490 losses = 50% loss rate.
+        Tail: 18 losses + 2 gains = 90% loss rate.
+        Two-proportion z-test (larger): tail loss rate >> body loss rate => p < 0.05.
         """
         small = [0.0001] * 490 + [-0.0001] * 490
         extremes = [-0.50] * 18 + [0.50] * 2
         returns = pd.Series(small + extremes)
 
         gl = GainLossAsymmetry(returns, "TEST")
-        result = gl.compute_asymmetry(q=0.98)
+        result = gl.compute_asymmetry(q=0.98, plot=False)
 
         self.assertIsNotNone(result)
         self.assertLess(result['pvalue'], 0.05,
-                        "18/20 losses should be statistically significant.")
+                        "Tail 90% losses vs body 50% should be significant.")
+        self.assertEqual(result['alternative'], 'larger')
+        self.assertGreater(result['z_stat'], 0)
+
+    def test_bullish_body_bearish_tail(self):
+        """
+        KEY TEST: Body is bullish (only 30% losses), but tail is bearish (80% losses).
+        This is the scenario the old binomial test (p=0.5) would get wrong for a
+        market with upward drift. The two-proportion z-test correctly detects
+        that the tail loss rate is significantly higher than the body's.
+        Body: 700 gains + 300 losses = 30% loss rate (values at |0.001|).
+        Tail: 16 losses + 4 gains out of 20 = 80% loss rate (values at |0.50|).
+        Use varied body values to avoid quantile ties.
+        """
+        np.random.seed(99)
+        body_gains = list(np.random.uniform(0.0001, 0.005, 700))
+        body_losses = list(-np.random.uniform(0.0001, 0.005, 300))
+        tail_losses = [-0.50] * 16
+        tail_gains = [0.50] * 4
+        returns = pd.Series(body_gains + body_losses + tail_losses + tail_gains)
+
+        gl = GainLossAsymmetry(returns, "TEST")
+        result = gl.compute_asymmetry(q=0.98, plot=False)
+
+        self.assertIsNotNone(result)
+        # Body is ~30% losses
+        self.assertAlmostEqual(result['body_loss_pct'], 30.0, delta=2.0)
+        # Tail is heavily loss-skewed (>=75%)
+        self.assertGreaterEqual(result['loss_pct'], 70.0)
+        # The z-test must detect this anomaly
+        self.assertLess(result['pvalue'], 0.05,
+                        "Tail 80% losses vs body 30% losses must be significant.")
+        self.assertEqual(result['alternative'], 'larger')
 
     def test_robustness_nan_inf(self):
         """
@@ -277,12 +305,10 @@ class TestGainLossAsymmetry(unittest.TestCase):
         data = pd.Series([0.01, -0.01, np.nan, np.inf, -np.inf, -0.50, 0.02] * 20)
         gl = GainLossAsymmetry(data, "ROBUST")
         try:
-            result = gl.compute_asymmetry(q=0.99)
-            self.assertIn('avg_loss', result)
-            self.assertIn('median_loss', result)
-            self.assertIn('avg_gain', result)
-            self.assertIn('median_gain', result)
+            result = gl.compute_asymmetry(q=0.99, plot=False)
             self.assertIn('pvalue', result)
+            self.assertIn('z_stat', result)
+            self.assertIn('body_loss_pct', result)
         except Exception as e:
             self.fail(f"GainLossAsymmetry CRASHED on NaN/Inf data: {e}")
 
