@@ -4,6 +4,7 @@ from data import DataManager
 from autocorrelation import AbsenceOfAutocorrelationTest
 from heavytails import HeavyTailsEVT
 from volclustering import VolatilityClustering
+from gainloss import GainLossAsymmetry
 import logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
@@ -11,13 +12,10 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 def run_analysis():
     # --- CONFIGURATION ---
     ticker = "SPY"
-    interval = "1d"  # Try "1m", "5m", "1h", or "1d"
+    interval = "1h"  # Try "1m", "5m", "1h", or "1d"
 
     # Adjust dates based on timeframe to ensure enough data
-    if interval == "1d":
-        start_date = "2020-01-01"  # Daily needs ~5 years for good EVT
-    else:
-        start_date = "2024-01-01"  # Intraday needs less time
+    start_date = "2020-01-01"  # Daily needs ~5 years for good EVT
     end_date = "2025-01-01"
 
     # --- STEP 1: GET DATA ---
@@ -53,6 +51,10 @@ def run_analysis():
     vc_tester = VolatilityClustering(returns, ticker)
     c2_values, vc_sig_lags = vc_tester.compute_c2(max_lag=40)
 
+    # FACT 4: Gain/Loss Asymmetry (Ratliff-Crain et al., 2024)
+    gl_tester = GainLossAsymmetry(returns, ticker)
+    gl_result = gl_tester.compute_asymmetry(q=0.95)
+
     # --- STEP 3: FINAL REPORT CARD ---
     print("\n" + "=" * 40)
     print(f"📝 FINAL REPORT CARD: {ticker}")
@@ -81,6 +83,22 @@ def run_analysis():
         print(f"✅ FACT 3 (Volatility Clustering): CONFIRMED (Significant at {len(vc_sig_lags)} lags)")
     else:
         print("❌ FACT 3 (Volatility Clustering): NOT DETECTED")
+
+    # Report Fact 4
+    if gl_result:
+        loss_pct = gl_result['loss_pct']
+        n_extreme = gl_result['n_extreme']
+        pval = gl_result['pvalue']
+        if pval < 0.05:
+            print(f"✅ FACT 4 (Gain/Loss Asymmetry): CONFIRMED (p={pval:.4f}, Losses={loss_pct:.1f}% of {n_extreme} extreme returns)")
+        else:
+            print(f"❌ FACT 4 (Gain/Loss Asymmetry): NOT SIGNIFICANT (p={pval:.4f}, Losses={loss_pct:.1f}%)")
+        if gl_result['avg_loss'] is not None:
+            print(f"   -> Avg extreme loss:    {gl_result['avg_loss']:.6f}  |  Median: {gl_result['median_loss']:.6f}")
+        if gl_result['avg_gain'] is not None:
+            print(f"   -> Avg extreme gain:   +{gl_result['avg_gain']:.6f}  |  Median: +{gl_result['median_gain']:.6f}")
+    else:
+        print("⚠️ FACT 4 (Gain/Loss Asymmetry): INCONCLUSIVE (Insufficient Data)")
     print("=" * 40 + "\n")
 
 

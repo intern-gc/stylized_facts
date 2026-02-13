@@ -5,6 +5,7 @@ import scipy.stats as stats
 from autocorrelation import AbsenceOfAutocorrelationTest
 from heavytails import HeavyTailsEVT
 from volclustering import VolatilityClustering
+from gainloss import GainLossAsymmetry
 
 
 class TestStylizedFactsTheoretical(unittest.TestCase):
@@ -174,6 +175,116 @@ class TestStylizedFactsTheoretical(unittest.TestCase):
         # For 1000 i.i.d. points, we expect at most ~1 spurious significant lag (5% chance each)
         self.assertLessEqual(len(sig_lags), 3,
                              "I.I.D. data should have very few (if any) significant C2 lags.")
+
+
+class TestGainLossAsymmetry(unittest.TestCase):
+
+    def test_known_loss_skew(self):
+        """
+        Construct 100 returns where the top 1% of |returns| are all losses.
+        With q=0.99, the cutoff selects the single largest |return|.
+        That return is -0.50 (a loss), so loss_pct should be 100%.
+        Binomial test: 1 loss out of 1 trial, p=0.5 => pvalue=1.0 (not significant
+        with n=1, which is correct - can't conclude asymmetry from one observation).
+        """
+        small = [0.01] * 50 + [-0.01] * 49
+        extreme = [-0.50]
+        returns = pd.Series(small + extreme)
+
+        gl = GainLossAsymmetry(returns, "TEST")
+        result = gl.compute_asymmetry(q=0.99)
+
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result['loss_pct'], 100.0, delta=0.01)
+        self.assertAlmostEqual(result['gain_pct'], 0.0, delta=0.01)
+        self.assertGreaterEqual(result['n_extreme'], 1)
+        self.assertAlmostEqual(result['avg_loss'], -0.50, delta=0.01)
+        self.assertAlmostEqual(result['median_loss'], -0.50, delta=0.01)
+        self.assertIsNone(result['avg_gain'])
+        self.assertIsNone(result['median_gain'])
+        # pvalue must be present and a float
+        self.assertIn('pvalue', result)
+        self.assertIsInstance(result['pvalue'], float)
+
+    def test_known_gain_skew(self):
+        """
+        Construct data where the top 1% of |returns| are all gains.
+        """
+        small = [0.01] * 50 + [-0.01] * 49
+        extreme = [0.50]
+        returns = pd.Series(small + extreme)
+
+        gl = GainLossAsymmetry(returns, "TEST")
+        result = gl.compute_asymmetry(q=0.99)
+
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result['loss_pct'], 0.0, delta=0.01)
+        self.assertAlmostEqual(result['gain_pct'], 100.0, delta=0.01)
+        self.assertAlmostEqual(result['avg_gain'], 0.50, delta=0.01)
+        self.assertAlmostEqual(result['median_gain'], 0.50, delta=0.01)
+        self.assertIsNone(result['avg_loss'])
+        self.assertIsNone(result['median_loss'])
+
+    def test_mixed_extremes(self):
+        """
+        Construct data where extreme returns are 75% losses, 25% gains.
+        Use q=0.96 so that top 4% = 4 out of 100 returns are extreme.
+        3 extreme losses: -0.50, -0.60, -0.70  =>  avg=-0.60, median=-0.60
+        1 extreme gain:   +0.55                 =>  avg=+0.55, median=+0.55
+        Binomial: 3 losses out of 4, p=0.5 => pvalue=0.625 (not significant with n=4).
+        """
+        small = [0.001] * 48 + [-0.001] * 48
+        extremes = [-0.50, -0.60, -0.70, 0.55]
+        returns = pd.Series(small + extremes)
+
+        gl = GainLossAsymmetry(returns, "TEST")
+        result = gl.compute_asymmetry(q=0.96)
+
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result['loss_pct'], 75.0, delta=0.01)
+        self.assertAlmostEqual(result['gain_pct'], 25.0, delta=0.01)
+        self.assertEqual(result['n_extreme'], 4)
+        self.assertAlmostEqual(result['avg_loss'], -0.60, delta=0.001)
+        self.assertAlmostEqual(result['median_loss'], -0.60, delta=0.001)
+        self.assertAlmostEqual(result['avg_gain'], 0.55, delta=0.001)
+        self.assertAlmostEqual(result['median_gain'], 0.55, delta=0.001)
+        # 3/4 losses is NOT significant at p<0.05 (binom_test(3,4,0.5) = 0.625)
+        self.assertGreater(result['pvalue'], 0.05)
+
+    def test_strong_loss_asymmetry_significant(self):
+        """
+        With enough extreme returns heavily skewed to losses,
+        the binomial test should yield p < 0.05.
+        1000 total: 980 near-zero + 20 extreme. q=0.99 selects top 1% = ~10 returns.
+        All 20 extremes have |r|=0.50 which is far above the near-zero returns,
+        so all 20 get selected. 18 losses, 2 gains => binom_test(18,20,0.5) ~ 0.0004.
+        """
+        small = [0.0001] * 490 + [-0.0001] * 490
+        extremes = [-0.50] * 18 + [0.50] * 2
+        returns = pd.Series(small + extremes)
+
+        gl = GainLossAsymmetry(returns, "TEST")
+        result = gl.compute_asymmetry(q=0.98)
+
+        self.assertIsNotNone(result)
+        self.assertLess(result['pvalue'], 0.05,
+                        "18/20 losses should be statistically significant.")
+
+    def test_robustness_nan_inf(self):
+        """
+        GainLossAsymmetry should handle NaN/Inf without crashing.
+        """
+        data = pd.Series([0.01, -0.01, np.nan, np.inf, -np.inf, -0.50, 0.02] * 20)
+        gl = GainLossAsymmetry(data, "ROBUST")
+        try:
+            result = gl.compute_asymmetry(q=0.99)
+            self.assertIn('avg_loss', result)
+            self.assertIn('median_loss', result)
+            self.assertIn('avg_gain', result)
+            self.assertIn('median_gain', result)
+            self.assertIn('pvalue', result)
+        except Exception as e:
+            self.fail(f"GainLossAsymmetry CRASHED on NaN/Inf data: {e}")
 
 
 if __name__ == '__main__':
