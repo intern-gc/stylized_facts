@@ -1,0 +1,49 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+env.bak/
+venv.bak/
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+out/
+
+# Data / cache
+financial_cache/
+data_cache/
+*.pkl
+*.h5
+*.csv  # only if temp; keep if important data
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# Temp files
+.DS_Store
+Thumbs.db
+.claude/
+.codeignore
+
+# IDE / editor
+.vscode/
+*.swp
+*.swo
+
+# OS generated
+.DS_Store?
+ehthumbs.db
+Thumbs.db
