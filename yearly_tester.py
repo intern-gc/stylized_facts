@@ -9,8 +9,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # CONFIGURATION
-RISK_TICKER = "SPY"  # Change to test others
-SAFE_TICKER = "GLD"
+RISK_TICKER = "TQQQ"  # Change to test others
+SAFE_TICKER = "BIL"
 INTERVAL = "1h"
 FULL_START = "2015-01-01"
 FULL_END = "2026-01-01"

@@ -6,6 +6,7 @@ from autocorrelation import AbsenceOfAutocorrelationTest
 from heavytails import HeavyTailsEVT
 from volclustering import VolatilityClustering
 from gainloss import GainLossAsymmetry
+from aggregational import AggregationalGaussianity
 
 
 class TestStylizedFactsTheoretical(unittest.TestCase):
@@ -609,6 +610,108 @@ class TestComputeStrategy(unittest.TestCase):
 
         self.assertAlmostEqual(result_a['bench_ret'], result_b['bench_ret'], places=6)
         self.assertAlmostEqual(result_a['sharpe_bench'], result_b['sharpe_bench'], places=6)
+
+
+class TestAggregationalGaussianity(unittest.TestCase):
+    """
+    Tests for Aggregational Gaussianity (Stylized Fact 5):
+    As returns are aggregated over longer horizons, the distribution
+    converges toward Gaussian (excess kurtosis -> 0) via CLT.
+    """
+
+    def setUp(self):
+        np.random.seed(42)
+        # Heavy-tailed data: t-distribution with df=3 has excess kurtosis = 6/(3-4) -> infinite,
+        # but finite-sample kurtosis will be high. Use df=5 for finite but heavy kurtosis.
+        # Excess kurtosis of t(df) = 6/(df-4) for df>4. So t(5) has excess kurtosis = 6.
+        self.heavy_tailed_returns = pd.Series(
+            stats.t.rvs(df=5, size=10000) * 0.01  # Scale to realistic return magnitude
+        )
+
+        # Gaussian data: excess kurtosis ~0 at all scales
+        self.gaussian_returns = pd.Series(
+            np.random.normal(0, 0.01, 10000)
+        )
+
+        # Dirty data for robustness
+        self.dirty_returns = pd.Series(
+            [0.01, -0.01, np.nan, np.inf, -np.inf, 0.02, -0.03] * 500
+        )
+
+    def test_kurtosis_decreases_with_aggregation(self):
+        """
+        Heavy-tailed returns should show DECREASING excess kurtosis
+        as the aggregation scale increases (CLT convergence).
+        """
+        ag = AggregationalGaussianity(self.heavy_tailed_returns, "TEST_HEAVY")
+        result = ag.test_aggregational_gaussianity(scales=[1, 5, 20, 50], plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, dict)
+        self.assertIn('kurtosis_by_scale', result)
+
+        kurt = result['kurtosis_by_scale']
+        # Kurtosis at scale 1 should be higher than at scale 50
+        self.assertGreater(kurt[1], kurt[50],
+                           "Excess kurtosis must decrease with aggregation for heavy-tailed data.")
+        # Kurtosis at scale 1 should be noticeably leptokurtic (excess > 1)
+        self.assertGreater(kurt[1], 1.0,
+                           "t(5) returns should have substantial excess kurtosis at scale 1.")
+
+    def test_gaussian_stays_near_zero_kurtosis(self):
+        """
+        Gaussian returns should have near-zero excess kurtosis at ALL scales.
+        CLT doesn't change already-Gaussian data.
+        """
+        ag = AggregationalGaussianity(self.gaussian_returns, "TEST_GAUSSIAN")
+        result = ag.test_aggregational_gaussianity(scales=[1, 5, 20], plot=False)
+
+        self.assertIsNotNone(result)
+        kurt = result['kurtosis_by_scale']
+        for scale, k in kurt.items():
+            self.assertAlmostEqual(k, 0.0, delta=1.0,
+                                   msg=f"Gaussian data should have near-zero excess kurtosis at scale {scale}.")
+
+    def test_return_structure(self):
+        """
+        Result dict must contain required keys with correct types.
+        """
+        ag = AggregationalGaussianity(self.heavy_tailed_returns, "TEST_STRUCT")
+        result = ag.test_aggregational_gaussianity(scales=[1, 10], plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertIn('kurtosis_by_scale', result)
+        self.assertIn('convergence_confirmed', result)
+
+        self.assertIsInstance(result['kurtosis_by_scale'], dict)
+        self.assertIsInstance(result['convergence_confirmed'], bool)
+
+        # Dict should have entries for each requested scale
+        self.assertIn(1, result['kurtosis_by_scale'])
+        self.assertIn(10, result['kurtosis_by_scale'])
+
+    def test_robustness_nan_inf(self):
+        """
+        AggregationalGaussianity should handle NaN/Inf without crashing.
+        """
+        ag = AggregationalGaussianity(self.dirty_returns, "TEST_ROBUST")
+        try:
+            result = ag.test_aggregational_gaussianity(scales=[1, 5], plot=False)
+            self.assertIsNotNone(result)
+            self.assertIn('kurtosis_by_scale', result)
+        except Exception as e:
+            self.fail(f"AggregationalGaussianity CRASHED on NaN/Inf data: {e}")
+
+    def test_convergence_detected_for_heavy_tails(self):
+        """
+        For heavy-tailed data, convergence_confirmed should be True
+        (kurtosis does decrease with aggregation).
+        """
+        ag = AggregationalGaussianity(self.heavy_tailed_returns, "TEST_CONVERGE")
+        result = ag.test_aggregational_gaussianity(scales=[1, 5, 20, 50], plot=False)
+
+        self.assertTrue(result['convergence_confirmed'],
+                        "Heavy-tailed data should show convergence toward Gaussianity.")
 
 
 if __name__ == '__main__':

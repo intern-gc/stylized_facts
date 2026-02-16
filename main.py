@@ -5,17 +5,18 @@ from autocorrelation import AbsenceOfAutocorrelationTest
 from heavytails import HeavyTailsEVT
 from volclustering import VolatilityClustering
 from gainloss import GainLossAsymmetry
+from aggregational import AggregationalGaussianity
 import logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 
 def run_analysis():
     # --- CONFIGURATION ---
-    ticker = "SPY"
+    ticker = "IWM"
     interval = "1h"  # Try "1m", "5m", "1h", or "1d"
 
     # Adjust dates based on timeframe to ensure enough data
-    start_date = "2020-01-01"  # Daily needs ~5 years for good EVT
+    start_date = "2015-01-01"  # Daily needs ~5 years for good EVT
     end_date = "2025-01-01"
 
     # --- STEP 1: GET DATA ---
@@ -54,6 +55,11 @@ def run_analysis():
     # FACT 4: Gain/Loss Asymmetry (Ratliff-Crain et al., 2024)
     gl_tester = GainLossAsymmetry(returns, ticker)
     gl_result = gl_tester.compute_asymmetry(q=0.95)
+
+    # FACT 5: Aggregational Gaussianity
+    ag_tester = AggregationalGaussianity(returns, ticker)
+    ag_scales = {'1m': [1, 5, 30, 78, 390], '5m': [1, 5, 16, 78], '1h': [1, 4, 7, 13, 26], '1d': [1, 5, 10, 21]}
+    ag_result = ag_tester.test_aggregational_gaussianity(scales=ag_scales.get(interval, [1, 4, 7, 13, 26]))
 
     # --- STEP 3: FINAL REPORT CARD ---
     print("\n" + "=" * 40)
@@ -107,6 +113,17 @@ def run_analysis():
             print(f"   -> Avg extreme gain:   +{gl_result['avg_gain']:.6f}  |  Median: +{gl_result['median_gain']:.6f}")
     else:
         print("⚠️ FACT 4 (Gain/Loss Asymmetry): INCONCLUSIVE (Insufficient Data)")
+
+    # Report Fact 5
+    if ag_result:
+        if ag_result['convergence_confirmed']:
+            kurt = ag_result['kurtosis_by_scale']
+            sorted_scales = sorted(kurt.keys())
+            print(f"✅ FACT 5 (Aggregational Gaussianity): CONFIRMED (κ: {kurt[sorted_scales[0]]:.2f} -> {kurt[sorted_scales[-1]]:.2f})")
+        else:
+            print("❌ FACT 5 (Aggregational Gaussianity): NOT DETECTED")
+    else:
+        print("⚠️ FACT 5 (Aggregational Gaussianity): INCONCLUSIVE (Insufficient Data)")
     print("=" * 40 + "\n")
 
 
