@@ -9,17 +9,17 @@ from datetime import datetime, timedelta, time
 RISK_TICKER = "SPY"
 SAFE_TICKER = "GLD"
 INTERVAL = "1h"
-START_DATE, END_DATE = "2021-01-01", "2022-01-01"
+START_DATE, END_DATE = "2015-01-01", "2026-01-01"
 
 # Strategy Parameters
 TARGET_VOL = 20.0  # Annualized vol target (%)
 MIN_LEV = 1.0
-MAX_LEV = 4.0
+MAX_LEV = 1
 VOL_WINDOW = 24
 BASELINE_WINDOW = 120
 SMOOTH_WINDOW = 5
-COST_BPS = 2.0
-HYSTERESIS = 0.10  # Only rebalance when ideal leverage deviates >10% from last trade
+COST_BPS = 4
+HYSTERESIS = 0.10  # i have since reduced max lev to 1 to simplify the backtest, but ill keep this code here even though its effectively useless if i want to come back and test it.
 
 DEFAULT_PARAMS = {
     'target_vol': TARGET_VOL,
@@ -90,7 +90,8 @@ def compute_strategy(ret_risk, ret_safe, params):
     data['Signal'] = data['Regime'].shift(1).fillna(1.0)
 
     # Leverage
-    data['Dyn_Leverage'] = calc_dynamic_leverage(data['Syn_VIX'], p['target_vol'], p['min_lev'], p['max_lev'])
+    data['Syn_VIX_Lagged'] = data['Syn_VIX'].shift(1)
+    data['Dyn_Leverage'] = calc_dynamic_leverage(data['Syn_VIX_Lagged'], p['target_vol'], p['min_lev'], p['max_lev'])
     data['Ideal_Leverage'] = data['Signal'] * data['Dyn_Leverage']
     data['Eff_Leverage'] = apply_hysteresis(data['Ideal_Leverage'], p['hysteresis'])
 
@@ -100,7 +101,7 @@ def compute_strategy(ret_risk, ret_safe, params):
     risk_leg = data['Eff_Leverage'] * data['Ret_Risk'] - borrow_cost_per_bar * in_risk
     safe_leg = (1 - in_risk) * data['Ret_Safe']
     lev_delta = data['Eff_Leverage'].diff().abs().fillna(0)
-    txn_costs = lev_delta * (p['cost_bps'] / 10000)
+    txn_costs = (lev_delta * 2) * (params['cost_bps'] / 10000)
     data['Strat_Ret'] = risk_leg + safe_leg - txn_costs
 
     # Evaluate
@@ -188,7 +189,10 @@ def run_rotation_strategy():
     data['Signal'] = data['Regime'].shift(1).fillna(1.0)
 
     # 4. DYNAMIC LEVERAGE (vol-targeted) with hysteresis
-    data['Dyn_Leverage'] = calc_dynamic_leverage(data['Syn_VIX'], TARGET_VOL, MIN_LEV, MAX_LEV)
+    data['Syn_VIX_Lagged'] = data['Syn_VIX'].shift(1)
+    data['Syn_VIX_Lagged'] = data['Syn_VIX_Lagged'].fillna(data['Syn_VIX_Lagged'].bfill())
+    data['Syn_VIX_Lagged'] = data['Syn_VIX_Lagged'].fillna(20.0)  # Initial leverage = 1x
+    data['Dyn_Leverage'] = calc_dynamic_leverage(data['Syn_VIX_Lagged'], TARGET_VOL, MIN_LEV, MAX_LEV)
     # Ideal effective leverage: full leverage in bull, 0 in safe
     data['Ideal_Leverage'] = data['Signal'] * data['Dyn_Leverage']
     # Apply hysteresis: only rebalance when ideal deviates >HYSTERESIS from last trade
@@ -204,7 +208,7 @@ def run_rotation_strategy():
     safe_leg = (1 - in_risk) * data['Ret_Safe']
 
     lev_delta = data['Eff_Leverage'].diff().abs().fillna(0)
-    txn_costs = lev_delta * (COST_BPS / 10000)
+    txn_costs = (lev_delta * 2) * (COST_BPS / 10000)
 
     data['Strat_Ret'] = risk_leg + safe_leg - txn_costs
 

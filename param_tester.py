@@ -15,12 +15,18 @@ FULL_END = "2025-01-01"
 
 # Rolling 1-year windows to test across different market regimes
 TIME_WINDOWS = [
+    ("2015-01-01", "2016-01-01"),  # China crash + oil collapse
+    ("2016-01-01", "2017-01-01"),  # Post-China vol normalization
+    ("2017-01-01", "2018-01-01"),  # Low-vol bull market
+    ("2018-01-01", "2019-01-01"),  # Volmageddon + Fed taper
+    ("2019-01-01", "2020-01-01"),  # Pre-COVID grind
     ("2020-01-01", "2021-01-01"),  # COVID crash + recovery
     ("2021-01-01", "2022-01-01"),  # Bull run
-    ("2022-01-01", "2023-01-01"),  # Bear market
+    ("2022-01-01", "2023-01-01"),  # Inflation bear
     ("2023-01-01", "2024-01-01"),  # Recovery
-    ("2024-01-01", "2025-01-01"),  # Recent
+    ("2024-01-01", "2025-01-01"),  # Tariff crash/volatility
 ]
+
 
 # Parameter sweep ranges (one-at-a-time around defaults)
 PARAM_SWEEPS = {
