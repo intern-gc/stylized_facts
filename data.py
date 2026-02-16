@@ -75,7 +75,7 @@ class DataManager:
                 # Only mark as empty if we actually got a successful response from the API
                 # and that specific day was simply not in the result.
                 for m_day in missing_days:
-                    if m_day not in days_received:
+                    if m_day.date() not in days_received:
                         empty_fname = f"{m_day.strftime('%y%m%d')}_{interval}_{ticker}.pkl"
                         pd.DataFrame().to_pickle(os.path.join(self.cache_dir, empty_fname))
 
@@ -97,7 +97,12 @@ class DataManager:
 
         stitched_dfs = [df for df in results if df is not None]
         if not stitched_dfs:
-            return pd.DataFrame(), pd.Series(), "❌ NO DATA"
+            n_cached = sum(1 for d in business_days if os.path.exists(os.path.join(self.cache_dir, needed_files[d])))
+            return pd.DataFrame(), pd.Series(), (
+                f"❌ NO DATA for {ticker} ({interval}): "
+                f"{len(business_days)} business days requested, {n_cached} cache files found but all empty. "
+                f"Try force_resync=True or delete the cache."
+            )
 
         full_df = pd.concat(stitched_dfs).sort_index()
         if full_df.index.tz is None: full_df.index = full_df.index.tz_localize('UTC')

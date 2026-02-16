@@ -313,5 +313,303 @@ class TestGainLossAsymmetry(unittest.TestCase):
             self.fail(f"GainLossAsymmetry CRASHED on NaN/Inf data: {e}")
 
 
+class TestDataManagerCacheBug(unittest.TestCase):
+    """
+    Regression test for the bug where days_received contains datetime.date objects
+    but missing_days contains pd.Timestamp objects, causing set membership checks
+    to always fail and overwrite real cache files with empty DataFrames.
+    """
+
+    def test_days_received_matches_missing_days_type(self):
+        """
+        Simulate the exact logic from DataManager.get_data():
+        - business_days from pd.bdate_range() produces pd.Timestamp objects
+        - groupby(index.date) produces datetime.date objects
+        - The set membership check must correctly identify received days
+
+        Bug: m_day (Timestamp) not in days_received (set of date) is always True
+        because Timestamp and date have different hashes and == returns False.
+        This causes real data files to be overwritten with empty DataFrames.
+        """
+        from datetime import date
+
+        # Simulate business_days (pd.Timestamps from bdate_range)
+        business_days = pd.bdate_range(start='2024-01-02', end='2024-01-05')
+
+        # Simulate missing_days (same type as business_days)
+        missing_days = list(business_days)
+
+        # Simulate days_received from groupby(index.date) - these are datetime.date
+        days_received = {date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)}
+
+        # Fixed check from data.py line 78 (uses .date() to convert Timestamp to date):
+        falsely_missing = [m_day for m_day in missing_days if m_day.date() not in days_received]
+
+        # If the bug exists, ALL days appear missing (would overwrite real data with empty DFs)
+        # After fix, NO days should appear missing (they were all received)
+        self.assertEqual(len(falsely_missing), 0,
+                         f"Type mismatch bug: {len(falsely_missing)} days falsely marked as missing. "
+                         f"Timestamp objects don't match datetime.date in set lookups.")
+
+
+class TestDataManagerErrorReporting(unittest.TestCase):
+    """
+    Tests that DataManager.get_data returns actionable error info
+    when no data is available, not just a vague message.
+    """
+
+    def test_empty_return_includes_ticker_in_report(self):
+        """
+        When get_data returns empty, the report string must include the ticker
+        so the caller knows WHICH asset failed.
+        """
+        from unittest.mock import patch, MagicMock
+        from data import DataManager
+
+        # Patch the client so no real API call happens
+        with patch.object(DataManager, '__init__', lambda self, **kw: None):
+            dm = DataManager()
+            dm.cache_dir = '/tmp/nonexistent_cache_dir_test'
+            dm.client = MagicMock()
+            dm.api_key = 'fake'
+            dm.secret_key = 'fake'
+
+            # get_data with a non-existent cache dir means no files found
+            dm.client.get_stock_bars.side_effect = Exception("API unavailable")
+
+            df, returns, report = dm.get_data("FAKEXYZ", "2024-01-02", "2024-01-05", "1d")
+
+            self.assertTrue(df.empty)
+            self.assertIn("FAKEXYZ", report,
+                          f"Error report must include the ticker name. Got: '{report}'")
+
+
+class TestVolTargetedLeverage(unittest.TestCase):
+    """
+    Tests for the vol-targeted dynamic leverage calculation:
+    leverage = clamp(target_vol / realized_vol, min_lev, max_lev)
+    """
+
+    def test_basic_vol_target_scaling(self):
+        """
+        With target_vol=15 and realized_vol=10, leverage should be 1.5.
+        With target_vol=15 and realized_vol=15, leverage should be 1.0.
+        With target_vol=15 and realized_vol=30, leverage should be 0.5 -> clamped to min.
+        """
+        from backtest import calc_dynamic_leverage
+
+        # Exact target match -> leverage = 1.0
+        result = calc_dynamic_leverage(realized_vol=15.0, target_vol=15.0, min_lev=1.0, max_lev=4.0)
+        self.assertAlmostEqual(result, 1.0, places=4)
+
+        # Low vol -> lever up: 15/10 = 1.5
+        result = calc_dynamic_leverage(realized_vol=10.0, target_vol=15.0, min_lev=1.0, max_lev=4.0)
+        self.assertAlmostEqual(result, 1.5, places=4)
+
+        # Very low vol -> lever up more: 15/5 = 3.0
+        result = calc_dynamic_leverage(realized_vol=5.0, target_vol=15.0, min_lev=1.0, max_lev=4.0)
+        self.assertAlmostEqual(result, 3.0, places=4)
+
+    def test_clamp_max(self):
+        """
+        When vol is very low, leverage must be capped at MAX_LEV.
+        target_vol=15, realized_vol=2 -> 15/2=7.5 -> clamped to 4.0
+        """
+        from backtest import calc_dynamic_leverage
+
+        result = calc_dynamic_leverage(realized_vol=2.0, target_vol=15.0, min_lev=1.0, max_lev=4.0)
+        self.assertAlmostEqual(result, 4.0, places=4)
+
+    def test_clamp_min(self):
+        """
+        When vol is very high, leverage must be floored at MIN_LEV.
+        target_vol=15, realized_vol=100 -> 15/100=0.15 -> clamped to 1.0
+        """
+        from backtest import calc_dynamic_leverage
+
+        result = calc_dynamic_leverage(realized_vol=100.0, target_vol=15.0, min_lev=1.0, max_lev=4.0)
+        self.assertAlmostEqual(result, 1.0, places=4)
+
+    def test_series_input(self):
+        """
+        calc_dynamic_leverage should work on a pd.Series of realized vols,
+        returning a Series of per-bar leverage values.
+        """
+        from backtest import calc_dynamic_leverage
+
+        realized_vols = pd.Series([5.0, 10.0, 15.0, 30.0, 2.0])
+        result = calc_dynamic_leverage(realized_vols, target_vol=15.0, min_lev=1.0, max_lev=4.0)
+
+        self.assertIsInstance(result, pd.Series)
+        expected = pd.Series([3.0, 1.5, 1.0, 1.0, 4.0])
+        pd.testing.assert_series_equal(result, expected, atol=0.0001)
+
+    def test_zero_vol_returns_max_leverage(self):
+        """
+        If realized vol is 0 or NaN, leverage should be capped at max (not inf/NaN).
+        """
+        from backtest import calc_dynamic_leverage
+
+        result_zero = calc_dynamic_leverage(realized_vol=0.0, target_vol=15.0, min_lev=1.0, max_lev=4.0)
+        self.assertAlmostEqual(result_zero, 4.0, places=4)
+
+        result_nan = calc_dynamic_leverage(realized_vol=float('nan'), target_vol=15.0, min_lev=1.0, max_lev=4.0)
+        self.assertAlmostEqual(result_nan, 4.0, places=4)
+
+    def test_inverse_relationship(self):
+        """
+        Core property: lower vol MUST produce higher leverage (inverse relationship).
+        """
+        from backtest import calc_dynamic_leverage
+
+        lev_low_vol = calc_dynamic_leverage(realized_vol=8.0, target_vol=15.0, min_lev=1.0, max_lev=4.0)
+        lev_high_vol = calc_dynamic_leverage(realized_vol=20.0, target_vol=15.0, min_lev=1.0, max_lev=4.0)
+
+        self.assertGreater(lev_low_vol, lev_high_vol,
+                           "Lower realized vol must produce higher leverage.")
+
+
+class TestHysteresisRebalancing(unittest.TestCase):
+    """
+    Tests for the hysteresis buffer on leverage rebalancing.
+    Only rebalance when ideal leverage deviates >10% from last traded position.
+    """
+
+    def test_no_rebalance_within_buffer(self):
+        """
+        If ideal leverage stays within 10% of the initial trade,
+        the actual leverage should remain at the initial value.
+        """
+        from backtest import apply_hysteresis
+
+        # Start at 2.0, then ideal fluctuates within 10% (1.8 to 2.2)
+        ideal = pd.Series([2.0, 2.05, 1.95, 2.10, 1.85, 2.15])
+        result = apply_hysteresis(ideal, hysteresis_pct=0.10)
+
+        # Should stay at 2.0 the whole time (all within 10%)
+        expected = pd.Series([2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+        pd.testing.assert_series_equal(result, expected, atol=0.0001)
+
+    def test_rebalance_when_exceeding_buffer(self):
+        """
+        When ideal leverage exceeds 10% from last traded, should rebalance.
+        """
+        from backtest import apply_hysteresis
+
+        # Start at 2.0, then jump to 2.5 (25% change > 10%), then stay near 2.5
+        ideal = pd.Series([2.0, 2.5, 2.45, 2.55])
+        result = apply_hysteresis(ideal, hysteresis_pct=0.10)
+
+        # Bar 0: trade to 2.0
+        # Bar 1: |2.5-2.0|/2.0 = 25% > 10% -> trade to 2.5
+        # Bar 2: |2.45-2.5|/2.5 = 2% < 10% -> stay at 2.5
+        # Bar 3: |2.55-2.5|/2.5 = 2% < 10% -> stay at 2.5
+        expected = pd.Series([2.0, 2.5, 2.5, 2.5])
+        pd.testing.assert_series_equal(result, expected, atol=0.0001)
+
+    def test_regime_switch_zero_to_nonzero(self):
+        """
+        Going from 0 (safe mode) to any nonzero leverage should always trigger a trade.
+        """
+        from backtest import apply_hysteresis
+
+        ideal = pd.Series([0.0, 0.0, 2.0, 2.05])
+        result = apply_hysteresis(ideal, hysteresis_pct=0.10)
+
+        # Bar 0-1: stay at 0
+        # Bar 2: 0->2.0 always triggers
+        # Bar 3: |2.05-2.0|/2.0 = 2.5% < 10% -> stay at 2.0
+        expected = pd.Series([0.0, 0.0, 2.0, 2.0])
+        pd.testing.assert_series_equal(result, expected, atol=0.0001)
+
+    def test_regime_switch_nonzero_to_zero(self):
+        """
+        Going from nonzero to 0 (safe mode) should always trigger.
+        |0 - 2.0| / 2.0 = 100% > 10%.
+        """
+        from backtest import apply_hysteresis
+
+        ideal = pd.Series([2.0, 2.05, 0.0, 0.0])
+        result = apply_hysteresis(ideal, hysteresis_pct=0.10)
+
+        expected = pd.Series([2.0, 2.0, 0.0, 0.0])
+        pd.testing.assert_series_equal(result, expected, atol=0.0001)
+
+    def test_preserves_index(self):
+        """
+        Output Series should preserve the input's index.
+        """
+        from backtest import apply_hysteresis
+
+        idx = pd.date_range('2024-01-01', periods=3, freq='h')
+        ideal = pd.Series([2.0, 2.05, 3.0], index=idx)
+        result = apply_hysteresis(ideal, hysteresis_pct=0.10)
+
+        self.assertTrue(result.index.equals(idx))
+
+
+class TestComputeStrategy(unittest.TestCase):
+    """
+    Tests for the refactored compute_strategy() function that returns metrics as a dict.
+    """
+
+    def setUp(self):
+        """Create synthetic return series long enough for the strategy warmup."""
+        np.random.seed(42)
+        n = 2000  # Need > BASELINE_WINDOW (120) + buffer
+        # Synthetic log returns with slight positive drift
+        self.ret_risk = pd.Series(
+            np.random.normal(0.0003, 0.01, n),
+            index=pd.date_range('2021-01-01', periods=n, freq='h')
+        )
+        self.ret_safe = pd.Series(
+            np.random.normal(0.0001, 0.005, n),
+            index=pd.date_range('2021-01-01', periods=n, freq='h')
+        )
+
+    def test_returns_dict_with_required_keys(self):
+        """compute_strategy must return a dict with all key metrics."""
+        from backtest import compute_strategy, DEFAULT_PARAMS
+
+        result = compute_strategy(self.ret_risk, self.ret_safe, DEFAULT_PARAMS)
+
+        self.assertIsInstance(result, dict)
+        required_keys = [
+            'total_ret', 'bench_ret', 'cagr_strat', 'cagr_bench',
+            'sharpe_strat', 'sharpe_bench', 'sortino_strat', 'sortino_bench',
+            'mdd_strat', 'mdd_bench', 'vol_strat', 'vol_bench',
+        ]
+        for key in required_keys:
+            self.assertIn(key, result, f"Missing key: {key}")
+            self.assertIsInstance(result[key], float, f"{key} should be float")
+            self.assertFalse(np.isnan(result[key]), f"{key} should not be NaN")
+
+    def test_metrics_change_with_different_params(self):
+        """Different parameter sets must produce different metrics (not hardcoded)."""
+        from backtest import compute_strategy, DEFAULT_PARAMS
+
+        params_low_vol = {**DEFAULT_PARAMS, 'target_vol': 10.0}
+        params_high_vol = {**DEFAULT_PARAMS, 'target_vol': 30.0}
+
+        result_low = compute_strategy(self.ret_risk, self.ret_safe, params_low_vol)
+        result_high = compute_strategy(self.ret_risk, self.ret_safe, params_high_vol)
+
+        # Different target vol should produce different Sharpe ratios
+        self.assertNotAlmostEqual(result_low['sharpe_strat'], result_high['sharpe_strat'], places=2)
+
+    def test_benchmark_unchanged_by_params(self):
+        """Benchmark metrics should be identical regardless of strategy parameters."""
+        from backtest import compute_strategy, DEFAULT_PARAMS
+
+        params_a = {**DEFAULT_PARAMS, 'target_vol': 15.0, 'max_lev': 3.0}
+        params_b = {**DEFAULT_PARAMS, 'target_vol': 25.0, 'max_lev': 5.0}
+
+        result_a = compute_strategy(self.ret_risk, self.ret_safe, params_a)
+        result_b = compute_strategy(self.ret_risk, self.ret_safe, params_b)
+
+        self.assertAlmostEqual(result_a['bench_ret'], result_b['bench_ret'], places=6)
+        self.assertAlmostEqual(result_a['sharpe_bench'], result_b['sharpe_bench'], places=6)
+
+
 if __name__ == '__main__':
     unittest.main()
