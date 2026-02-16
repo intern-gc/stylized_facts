@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, time
 
 # --- CONFIGURATION ---
 RISK_TICKER = "SPY"
-SAFE_TICKER = "UUP"
+SAFE_TICKER = "GLD"
 INTERVAL = "1h"
 START_DATE, END_DATE = "2015-01-01", "2026-01-01"
 
@@ -18,7 +18,7 @@ MAX_LEV = 1
 VOL_WINDOW = 24
 BASELINE_WINDOW = 120
 SMOOTH_WINDOW = 5
-COST_BPS = 5 #this is for one side of one asset. so if regime switches it actually costs 2x of this.
+COST_BPS = 4 #this is for one side of one asset. so if regime switches it actually costs 2x of this.
 HYSTERESIS = 0.10  # i have since reduced max lev to 1 to simplify the backtest, but ill keep this code here even though its effectively useless if i want to come back and test it.
 
 DEFAULT_PARAMS = {
