@@ -8,7 +8,7 @@
 
 ## 2. Clone and Prepare
 ```
-git clone [https://github.com/your-username/financial-stylized-facts.git](https://github.com/your-username/financial-stylized-facts.git)
+git clone [https://github.com/intern-gc/financial-stylized-facts.git](https://github.com/intern-gc/financial-stylized-facts.git)
 cd financial-stylized-facts
 ```
 
