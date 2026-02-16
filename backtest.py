@@ -6,14 +6,14 @@ import os
 from datetime import datetime, timedelta, time
 
 # --- CONFIGURATION ---
-RISK_TICKER = "SPY"
+RISK_TICKER = "VT"
 SAFE_TICKER = "GLD"
 INTERVAL = "1h"
 START_DATE, END_DATE = "2015-01-01", "2026-01-01"
 
 # Strategy Parameters
 TARGET_VOL = 20.0  # Annualized vol target (%)
-MIN_LEV = 1.0
+MIN_LEV = 1
 MAX_LEV = 1
 VOL_WINDOW = 24
 BASELINE_WINDOW = 120

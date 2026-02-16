@@ -52,7 +52,8 @@ class DataManager:
                 timeframe=self._get_alpaca_tf(interval),
                 start=datetime.combine(fetch_start, time(0, 0)),
                 end=datetime.combine(fetch_end, time(23, 59)),
-                feed="sip"
+                feed="sip",
+                adjustment='split'
             )
 
             try:
