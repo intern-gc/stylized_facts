@@ -56,9 +56,17 @@ class SlowDecay:
         A = float(np.exp(intercept))
         return beta, A
 
-    def compute_decay(self, max_lag=100, plot=True):
+    def compute_decay(self, max_lag=100, fit_start=20, plot=True):
         """
         Compute power-law decay exponent for both alpha=1 and alpha=2.
+
+        Parameters
+        ----------
+        max_lag   : Maximum lag to compute ACF up to.
+        fit_start : Number of initial lags to skip before fitting the power law.
+                    Short-range dynamics (GARCH-like exponential decay) contaminate
+                    the log-log slope when fit_start=0. Typical choice: 20 for daily,
+                    same value works for intraday since it's just an index offset.
 
         Returns dict with:
           beta_alpha1, A_alpha1  : power-law params for |r|^1
@@ -77,12 +85,12 @@ class SlowDecay:
         # --- Alpha = 1: absolute returns ---
         abs_returns = np.abs(self.returns)
         acf1 = self._compute_acf(abs_returns, max_lag)
-        beta1, A1 = self._fit_power_law(lags, acf1)
+        beta1, A1 = self._fit_power_law(lags[fit_start:], acf1[fit_start:])
 
         # --- Alpha = 2: squared returns ---
         sq_returns = self.returns ** 2
         acf2 = self._compute_acf(sq_returns, max_lag)
-        beta2, A2 = self._fit_power_law(lags, acf2)
+        beta2, A2 = self._fit_power_law(lags[fit_start:], acf2[fit_start:])
 
         slow_decay_confirmed = (
             (beta1 is not None and 0.2 <= beta1 <= 0.4) or
@@ -110,9 +118,12 @@ class SlowDecay:
                     if pos_mask.any() and beta is not None:
                         ax2.scatter(np.log(lags[pos_mask]), np.log(acf[pos_mask]),
                                     s=5, color='steelblue', alpha=0.7, label='Data')
-                        fit_line = np.log(A) - beta * np.log(lags[pos_mask])
-                        ax2.plot(np.log(lags[pos_mask]), fit_line, 'r--',
-                                 label=f'β={beta:.3f}')
+                        # Fit line only over the region actually used for regression
+                        fit_mask = pos_mask & (lags > fit_start)
+                        if fit_mask.any():
+                            fit_line = np.log(A) - beta * np.log(lags[fit_mask])
+                            ax2.plot(np.log(lags[fit_mask]), fit_line, 'r--',
+                                     label=f'β={beta:.3f} (fit from lag {fit_start+1})')
                     ax2.set_title(f"Log-Log fit {alpha_label}: {self.ticker}")
                     ax2.set_xlabel("ln(τ)")
                     ax2.set_ylabel("ln(C_α(τ))")
@@ -123,7 +134,7 @@ class SlowDecay:
                 pass
 
         print(f"--- Slow Decay Results: {self.ticker} ---")
-        print(f"Sample size: {len(self.returns)}")
+        print(f"Sample size: {len(self.returns)} | Fit range: lags {fit_start + 1}..{max_lag}")
         if beta1 is not None:
             print(f"Alpha=1: β={beta1:.4f}, A={A1:.4f}")
         else:

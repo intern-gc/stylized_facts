@@ -50,14 +50,10 @@ class GainLossAsymmetry:
         median_gain = float(np.median(gains)) if n_gains > 0 else None
 
         # Two-proportion z-test: tail loss rate vs body loss rate
-        # Determine direction: test if tail has MORE losses or FEWER losses
-        tail_loss_rate = n_tail_losses / n_extreme
-        body_loss_rate = n_body_losses / n_body
-
-        if tail_loss_rate >= body_loss_rate:
-            alternative = 'larger'
-        else:
-            alternative = 'smaller'
+        # H1 is pre-specified: the stylized fact predicts downside asymmetry,
+        # i.e., extreme returns should contain MORE losses than the body ('larger').
+        # Picking the direction after seeing the data would halve the effective p-value.
+        alternative = 'larger'
 
         # proportions_ztest: count array, nobs array
         # Group A (index 0) = tail, Group B (index 1) = body

@@ -11,6 +11,8 @@ from intermittency import Intermittency
 from decay import SlowDecay
 from leverage import LeverageEffect
 from volvolcorr import VolVolCorr
+from timescales import AsymmetryTimescales
+from conditional import ConditionalTails
 
 
 class TestStylizedFactsTheoretical(unittest.TestCase):
@@ -1194,6 +1196,231 @@ class TestVolVolCorr(unittest.TestCase):
         data_v = pd.Series([1e6, 2e6, 1.5e6])
         vvc = VolVolCorr(data_r, data_v, "TEST_SHORT")
         result = vvc.compute_correlation(plot=False)
+        self.assertIsNone(result)
+
+
+class TestAsymmetryTimescales(unittest.TestCase):
+    """
+    Tests for Asymmetry in Time Scales (Stylized Fact 10).
+
+    Method (2024 paper):
+      A(tau, dt, dT)  = Corr(V_ΔT(i), |r(t_i + tau)|)   -- coarse vol vs future fine vol
+      A(-tau, dt, dT) = Corr(V_ΔT(i), |r(t_i - tau)|)   -- coarse vol vs past fine vol
+      D(tau, dt, dT)  = A(tau) - A(-tau)
+
+    Coarse volatility V_ΔT is computed over non-overlapping blocks of dT fine returns.
+    D < 0 indicates top-down information flow (not consistently supported in 2024 study).
+    """
+
+    def setUp(self):
+        np.random.seed(42)
+        n = 4000
+
+        # IID returns: no volatility structure, D should be near zero
+        self.iid_returns = pd.Series(np.random.normal(0, 0.01, n))
+
+        # GARCH-like clustered returns (autocorrelated volatility)
+        sigma = np.zeros(n)
+        r_garch = np.zeros(n)
+        sigma[0] = 0.01
+        for t in range(1, n):
+            sigma[t] = np.sqrt(max(1e-8, 0.00005 + 0.15 * r_garch[t - 1] ** 2 + 0.80 * sigma[t - 1] ** 2))
+            r_garch[t] = sigma[t] * np.random.normal()
+        self.garch_returns = pd.Series(r_garch)
+
+        # Dirty data: NaN and Inf interspersed
+        clean_r = np.random.normal(0, 0.01, 500)
+        dirty_r = np.concatenate([clean_r, [np.nan] * 20, [np.inf] * 10, [-np.inf] * 10])
+        self.dirty_returns = pd.Series(dirty_r)
+
+    def test_return_structure(self):
+        """Result dict must contain all required keys with correct types."""
+        ts = AsymmetryTimescales(self.iid_returns, "TEST")
+        result = ts.compute_asymmetry(dT=5, max_tau=5, plot=False)
+
+        self.assertIsNotNone(result)
+        required_keys = ['taus', 'A_pos', 'A_neg', 'D_values', 'D_mean', 'top_down_detected']
+        for key in required_keys:
+            self.assertIn(key, result, f"Missing key: {key}")
+
+        self.assertIsInstance(result['taus'], list)
+        self.assertIsInstance(result['A_pos'], list)
+        self.assertIsInstance(result['A_neg'], list)
+        self.assertIsInstance(result['D_values'], list)
+        self.assertIsInstance(result['D_mean'], float)
+        self.assertIsInstance(result['top_down_detected'], bool)
+        self.assertEqual(len(result['taus']), 5)
+        self.assertEqual(len(result['A_pos']), 5)
+        self.assertEqual(len(result['A_neg']), 5)
+        self.assertEqual(len(result['D_values']), 5)
+
+    def test_D_equals_Apos_minus_Aneg(self):
+        """D(tau) must equal A(tau) - A(-tau) element-wise, to floating-point precision."""
+        ts = AsymmetryTimescales(self.garch_returns, "TEST_FORMULA")
+        result = ts.compute_asymmetry(dT=5, max_tau=5, plot=False)
+
+        self.assertIsNotNone(result)
+        for i, (d, a_pos, a_neg) in enumerate(zip(result['D_values'],
+                                                   result['A_pos'],
+                                                   result['A_neg'])):
+            if np.isfinite(d) and np.isfinite(a_pos) and np.isfinite(a_neg):
+                self.assertAlmostEqual(
+                    d, a_pos - a_neg, places=10,
+                    msg=f"D[{i}] = {d:.6f} != A_pos[{i}] - A_neg[{i}] = {a_pos - a_neg:.6f}"
+                )
+
+    def test_A_values_are_valid_correlations(self):
+        """A_pos and A_neg must be in [-1, 1] for all tau."""
+        ts = AsymmetryTimescales(self.garch_returns, "TEST_RANGE")
+        result = ts.compute_asymmetry(dT=5, max_tau=8, plot=False)
+
+        self.assertIsNotNone(result)
+        for i, (a_pos, a_neg) in enumerate(zip(result['A_pos'], result['A_neg'])):
+            if np.isfinite(a_pos):
+                self.assertGreaterEqual(a_pos, -1.0 - 1e-9,
+                                        f"A_pos[{i}]={a_pos:.4f} out of [-1,1]")
+                self.assertLessEqual(a_pos, 1.0 + 1e-9,
+                                     f"A_pos[{i}]={a_pos:.4f} out of [-1,1]")
+            if np.isfinite(a_neg):
+                self.assertGreaterEqual(a_neg, -1.0 - 1e-9,
+                                        f"A_neg[{i}]={a_neg:.4f} out of [-1,1]")
+                self.assertLessEqual(a_neg, 1.0 + 1e-9,
+                                     f"A_neg[{i}]={a_neg:.4f} out of [-1,1]")
+
+    def test_iid_D_near_zero(self):
+        """IID returns have no time-scale structure: |D_mean| must be < 0.15."""
+        np.random.seed(99)
+        iid = pd.Series(np.random.normal(0, 0.01, 5000))
+        ts = AsymmetryTimescales(iid, "IID")
+        result = ts.compute_asymmetry(dT=5, max_tau=5, plot=False)
+
+        self.assertIsNotNone(result)
+        d_mean = result['D_mean']
+        self.assertLess(abs(d_mean), 0.15,
+                        f"IID data should have |D_mean| < 0.15, got {d_mean:.4f}")
+
+    def test_robustness_nan_inf(self):
+        """AsymmetryTimescales must not crash on NaN/Inf input."""
+        ts = AsymmetryTimescales(self.dirty_returns, "ROBUST")
+        try:
+            result = ts.compute_asymmetry(dT=5, max_tau=5, plot=False)
+            if result is not None:
+                self.assertIn('D_mean', result)
+                self.assertIsInstance(result['D_mean'], float)
+        except Exception as e:
+            self.fail(f"AsymmetryTimescales CRASHED on NaN/Inf data: {e}")
+
+    def test_insufficient_data_returns_none(self):
+        """Series shorter than dT*(max_tau+2) must return None."""
+        short = pd.Series([0.01, -0.01, 0.02, 0.00, -0.02])
+        ts = AsymmetryTimescales(short, "SHORT")
+        result = ts.compute_asymmetry(dT=5, max_tau=10, plot=False)
+        self.assertIsNone(result)
+
+
+class TestConditionalTails(unittest.TestCase):
+    """
+    Tests for Conditional Heavy Tails (Stylized Fact 11).
+
+    Model-independent decomposition:
+        r_t = σ_t · ε_t
+    where σ_t is the GARCH(1,1) conditional volatility and ε_t are standardized residuals.
+
+    Test: ε_t exhibits non-Gaussian behavior (excess kurtosis > 0, heavy tails)
+    even after removing the GARCH volatility component.
+    """
+
+    def setUp(self):
+        np.random.seed(42)
+
+        # Simulate GARCH(1,1) with Student-t innovations (ν=5 → excess kurtosis = 6)
+        n = 2000
+        sigma = np.zeros(n)
+        r = np.zeros(n)
+        sigma[0] = 0.01
+        for t in range(1, n):
+            sigma[t] = np.sqrt(max(1e-10, 0.00005 + 0.10 * r[t - 1] ** 2 + 0.85 * sigma[t - 1] ** 2))
+            r[t] = sigma[t] * float(np.random.standard_t(df=5))
+        self.garch_t_returns = pd.Series(r)
+
+        # Dirty data
+        clean_r = np.random.normal(0, 0.01, 300)
+        dirty_r = np.concatenate([clean_r, [np.nan] * 20, [np.inf] * 10, [-np.inf] * 10])
+        self.dirty_returns = pd.Series(dirty_r)
+
+    def test_return_structure(self):
+        """Result dict must contain all required keys with correct types."""
+        ct = ConditionalTails(self.garch_t_returns, "TEST")
+        result = ct.compute_conditional_tails(plot=False)
+
+        self.assertIsNotNone(result)
+        required_keys = ['residuals', 'kurtosis', 'excess_kurtosis', 'tail_index', 'non_gaussian']
+        for key in required_keys:
+            self.assertIn(key, result, f"Missing key: {key}")
+
+        self.assertIsInstance(result['residuals'], np.ndarray)
+        self.assertIsInstance(result['kurtosis'], float)
+        self.assertIsInstance(result['excess_kurtosis'], float)
+        self.assertIsInstance(result['non_gaussian'], bool)
+        # tail_index may be float or nan, but must be a float type
+        self.assertIsInstance(result['tail_index'], float)
+
+    def test_garch_t_residuals_have_excess_kurtosis(self):
+        """
+        GARCH(1,1) with t(5) innovations: after GARCH filtering, standardized
+        residuals must still have excess kurtosis > 0.
+        """
+        ct = ConditionalTails(self.garch_t_returns, "GARCH_T")
+        result = ct.compute_conditional_tails(plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertGreater(result['excess_kurtosis'], 0.0,
+                           f"Excess kurtosis should be > 0 for t-distributed innovations, "
+                           f"got {result['excess_kurtosis']:.4f}")
+
+    def test_residuals_approximately_unit_std(self):
+        """
+        After dividing by GARCH conditional volatility, std of ε_t should be near 1.
+        Allow generous tolerance [0.7, 1.5] for finite-sample estimation.
+        """
+        ct = ConditionalTails(self.garch_t_returns, "STD_CHECK")
+        result = ct.compute_conditional_tails(plot=False)
+
+        self.assertIsNotNone(result)
+        eps = result['residuals']
+        std_eps = float(np.std(eps))
+        self.assertGreater(std_eps, 0.7,
+                           f"Residual std should be > 0.7, got {std_eps:.4f}")
+        self.assertLess(std_eps, 1.5,
+                        f"Residual std should be < 1.5, got {std_eps:.4f}")
+
+    def test_tail_index_is_finite_positive(self):
+        """Hill estimator tail index must be finite and positive for fat-tailed data."""
+        ct = ConditionalTails(self.garch_t_returns, "TAIL_IDX")
+        result = ct.compute_conditional_tails(plot=False)
+
+        self.assertIsNotNone(result)
+        tai = result['tail_index']
+        self.assertTrue(np.isfinite(tai),
+                        f"tail_index must be finite, got {tai}")
+        self.assertGreater(tai, 0.0,
+                           f"tail_index must be positive, got {tai:.4f}")
+
+    def test_robustness_nan_inf(self):
+        """ConditionalTails must not crash on NaN/Inf input."""
+        ct = ConditionalTails(self.dirty_returns, "ROBUST")
+        try:
+            result = ct.compute_conditional_tails(plot=False)
+            if result is not None:
+                self.assertIn('excess_kurtosis', result)
+        except Exception as e:
+            self.fail(f"ConditionalTails CRASHED on NaN/Inf data: {e}")
+
+    def test_insufficient_data_returns_none(self):
+        """Data shorter than minimum threshold must return None."""
+        short = pd.Series(np.random.normal(0, 0.01, 10))
+        ct = ConditionalTails(short, "SHORT")
+        result = ct.compute_conditional_tails(plot=False)
         self.assertIsNone(result)
 
 

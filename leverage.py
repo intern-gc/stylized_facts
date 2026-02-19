@@ -78,12 +78,13 @@ class LeverageEffect:
         finite_pos = pos_L[np.isfinite(pos_L)]
         leverage_detected = bool(len(finite_pos) > 0 and np.any(finite_pos < 0))
 
-        # Global minimum (across all lags)
-        finite_mask = np.isfinite(L_arr)
-        if finite_mask.any():
-            min_idx = int(np.nanargmin(L_arr))
-            min_L = float(L_arr[min_idx])
-            min_lag = int(lags[min_idx])
+        # Minimum over positive lags only (leverage = predictive, not contemporaneous)
+        pos_lags_arr = lags[pos_mask]
+        finite_pos_mask = np.isfinite(pos_L)
+        if finite_pos_mask.any():
+            min_idx = int(np.nanargmin(pos_L))
+            min_L = float(pos_L[min_idx])
+            min_lag = int(pos_lags_arr[min_idx])
         else:
             min_L = float('nan')
             min_lag = 0

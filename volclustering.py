@@ -26,7 +26,8 @@ class VolatilityClustering:
         if returns is None:
             self.returns = np.array([])
         else:
-            self.returns = np.asarray(returns).flatten()
+            arr = np.asarray(returns).flatten().astype(float)
+            self.returns = arr[np.isfinite(arr)]
         self.ticker = ticker
         self.squared_returns = self.returns ** 2
 

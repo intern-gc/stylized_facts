@@ -4,20 +4,20 @@ import matplotlib.pyplot as plt
 from data import DataManager
 
 # --- CONFIGURATION ---
-RISK_TICKER = "XLE"
+RISK_TICKER = "XLK"
 SAFE_TICKER = "BIL"
 INTERVAL = "1h"
-START_DATE, END_DATE = "2015-01-01", "2026-01-01"
+START_DATE, END_DATE = "2021-01-01", "2026-01-01"
 
 # Strategy Parameters
-TARGET_VOL = 20.0  # Annualized vol target (%)
+TARGET_VOL = 50.0  # Annualized vol target (%)
 MIN_LEV = 1
 MAX_LEV = 1
 VOL_WINDOW = 24
 BASELINE_WINDOW = 120
 SMOOTH_WINDOW = 5
-COST_BPS = 4 #this is for one side of one asset. so if regime switches it actually costs 2x of this.
-HYSTERESIS = 0.10  # i have since reduced max lev to 1 to simplify the backtest, but ill keep this code here even though its effectively useless if i want to come back and test it.
+COST_BPS = 4
+HYSTERESIS = 0.10
 
 DEFAULT_PARAMS = {
     'target_vol': TARGET_VOL,
@@ -28,6 +28,7 @@ DEFAULT_PARAMS = {
     'smooth_window': SMOOTH_WINDOW,
     'cost_bps': COST_BPS,
     'hysteresis': HYSTERESIS,
+    'trend_window': 200  # Added safely, defaults to 200 if missing in other scripts
 }
 
 
@@ -90,7 +91,19 @@ def compute_strategy(ret_risk, ret_safe, params):
     data['Syn_VIX'] = data['Raw_Vol'].rolling(int(p['smooth_window'])).mean()
     data['VIX_MA'] = data['Syn_VIX'].rolling(int(p['baseline_window'])).mean()
 
-    data['Regime'] = np.where(data['Syn_VIX'] > data['VIX_MA'], 0.0, 1.0)
+    # --- NEW TREND FILTER ---
+    # Reconstruct a synthetic price index to measure trend
+    data['Price_Index'] = np.exp(data['Ret_Risk'].cumsum())
+
+    # Calculate Moving Average (safely fallback to 200 if 'trend_window' is not in older dicts)
+    trend_window = int(p.get('trend_window', 200))
+    data['Price_MA'] = data['Price_Index'].rolling(trend_window).mean()
+
+    # Determine if we are above the MA
+    data['Is_Uptrend'] = data['Price_Index'] > data['Price_MA']
+
+    # Modified Regime: Go to Safe Mode (0.0) ONLY IF Vol is high AND Trend is Down.
+    data['Regime'] = np.where((data['Syn_VIX'] > data['VIX_MA']) & (~data['Is_Uptrend']), 0.0, 1.0)
     data['Signal'] = data['Regime'].shift(1).fillna(1.0)
 
     # Leverage
@@ -105,11 +118,11 @@ def compute_strategy(ret_risk, ret_safe, params):
     risk_leg = data['Eff_Leverage'] * data['Ret_Risk'] - borrow_cost_per_bar * in_risk
     safe_leg = (1 - in_risk) * data['Ret_Safe']
     lev_delta = data['Eff_Leverage'].diff().abs().fillna(0)
-    txn_costs = (lev_delta * 2) * (params['cost_bps'] / 10000)
+    txn_costs = (lev_delta * 2) * (params.get('cost_bps', 4) / 10000)
     data['Strat_Ret'] = risk_leg + safe_leg - txn_costs
 
     # Evaluate
-    start_idx = max(int(p['vol_window']), int(p['baseline_window']), int(p['smooth_window'])) + 1
+    start_idx = max(int(p['vol_window']), int(p['baseline_window']), int(p['smooth_window']), trend_window) + 1
     eval_data = data.iloc[start_idx:].copy()
 
     if len(eval_data) < 10:
@@ -183,7 +196,7 @@ def run_rotation_strategy():
         print("❌ Error: No timestamp overlap between assets!")
         return
 
-    # Run core strategy (reuses compute_strategy instead of duplicating logic)
+    # Run core strategy
     result = compute_strategy(ret_risk, ret_safe, DEFAULT_PARAMS)
     if result is None:
         print("❌ Strategy computation failed.")
@@ -208,33 +221,27 @@ def run_rotation_strategy():
     sortino_strat = metrics['sortino_strat']
     sortino_bench = metrics['sortino_bench']
 
-    # Calmar (both)
     calmar_strat = cagr_strat / abs(mdd_strat) if mdd_strat != 0 else 0
     calmar_bench = cagr_bench / abs(mdd_bench) if mdd_bench != 0 else 0
 
-    # Skew & Kurtosis of returns
     skew_strat = eval_data['Strat_Ret'].skew()
     skew_bench = eval_data['Ret_Risk'].skew()
     kurt_strat = eval_data['Strat_Ret'].kurtosis()
     kurt_bench = eval_data['Ret_Risk'].kurtosis()
 
-    # Regime Stats
     bull_mask = eval_data['Signal'] == 1
     safe_mask = eval_data['Signal'] == 0
     time_bull = bull_mask.mean() * 100
     time_safe = safe_mask.mean() * 100
 
-    # Win Rates (Hourly)
     win_rate_bull = (eval_data[bull_mask]['Strat_Ret'] > 0).mean() * 100
     win_rate_safe = (eval_data[safe_mask]['Strat_Ret'] > 0).mean() * 100
 
-    # Leverage stats (bull mode only)
     bull_lev = eval_data.loc[bull_mask, 'Dyn_Leverage']
     avg_lev = bull_lev.mean() if len(bull_lev) > 0 else 0
     min_lev_used = bull_lev.min() if len(bull_lev) > 0 else 0
     max_lev_used = bull_lev.max() if len(bull_lev) > 0 else 0
 
-    # Rebalance count (leverage changes > 0.1x)
     rebalances = (eval_data['Eff_Leverage'].diff().abs() > 0.1).sum()
 
     print("\n" + "=" * 60)
@@ -270,7 +277,6 @@ def run_rotation_strategy():
     # --- VISUALIZATION ---
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
 
-    # Top Panel: Equity
     ax1.plot(eval_data.index, eval_data['Eq_Strat'], label='Strategy', color='#FFD700', linewidth=2)
     ax1.plot(eval_data.index, eval_data['Eq_Bench'], label='Benchmark', color='black', alpha=0.3)
     ax1.set_title(f"{RISK_TICKER} Rotation Strategy Performance")
@@ -278,14 +284,12 @@ def run_rotation_strategy():
     ax1.legend()
     ax1.grid(True, alpha=0.2)
 
-    # Bottom Panel: Regime Heatmap
     ax2.fill_between(eval_data.index, 0, 1, where=bull_mask, facecolor='green', alpha=0.6, label='Bull Mode')
     ax2.fill_between(eval_data.index, 0, 1, where=safe_mask, facecolor='red', alpha=0.6, label='Safe Mode')
     ax2.set_yticks([])
     ax2.set_title("Current Regime")
     ax2.legend(loc='upper right')
 
-    # Overlay VIX Baseline
     ax3 = ax2.twinx()
     ax3.plot(eval_data.index, eval_data['Syn_VIX'], color='white', alpha=0.3, linewidth=0.5)
     ax3.set_yticks([])
