@@ -7,6 +7,10 @@ from heavytails import HeavyTailsEVT
 from volclustering import VolatilityClustering
 from gainloss import GainLossAsymmetry
 from aggregational import AggregationalGaussianity
+from intermittency import Intermittency
+from decay import SlowDecay
+from leverage import LeverageEffect
+from volvolcorr import VolVolCorr
 
 
 class TestStylizedFactsTheoretical(unittest.TestCase):
@@ -569,34 +573,37 @@ class TestComputeStrategy(unittest.TestCase):
         )
 
     def test_returns_dict_with_required_keys(self):
-        """compute_strategy must return a dict with all key metrics."""
+        """compute_strategy must return a (dict, DataFrame) tuple with all key metrics."""
         from backtest import compute_strategy, DEFAULT_PARAMS
 
         result = compute_strategy(self.ret_risk, self.ret_safe, DEFAULT_PARAMS)
 
-        self.assertIsInstance(result, dict)
+        self.assertIsInstance(result, tuple)
+        metrics, eval_data = result
+        self.assertIsInstance(metrics, dict)
+        self.assertIsInstance(eval_data, pd.DataFrame)
         required_keys = [
             'total_ret', 'bench_ret', 'cagr_strat', 'cagr_bench',
             'sharpe_strat', 'sharpe_bench', 'sortino_strat', 'sortino_bench',
             'mdd_strat', 'mdd_bench', 'vol_strat', 'vol_bench',
         ]
         for key in required_keys:
-            self.assertIn(key, result, f"Missing key: {key}")
-            self.assertIsInstance(result[key], float, f"{key} should be float")
-            self.assertFalse(np.isnan(result[key]), f"{key} should not be NaN")
+            self.assertIn(key, metrics, f"Missing key: {key}")
+            self.assertIsInstance(metrics[key], float, f"{key} should be float")
+            self.assertFalse(np.isnan(metrics[key]), f"{key} should not be NaN")
 
     def test_metrics_change_with_different_params(self):
         """Different parameter sets must produce different metrics (not hardcoded)."""
         from backtest import compute_strategy, DEFAULT_PARAMS
 
-        params_low_vol = {**DEFAULT_PARAMS, 'target_vol': 10.0}
-        params_high_vol = {**DEFAULT_PARAMS, 'target_vol': 30.0}
+        params_low_vol = {**DEFAULT_PARAMS, 'target_vol': 10.0, 'max_lev': 4.0}
+        params_high_vol = {**DEFAULT_PARAMS, 'target_vol': 30.0, 'max_lev': 4.0}
 
-        result_low = compute_strategy(self.ret_risk, self.ret_safe, params_low_vol)
-        result_high = compute_strategy(self.ret_risk, self.ret_safe, params_high_vol)
+        metrics_low, _ = compute_strategy(self.ret_risk, self.ret_safe, params_low_vol)
+        metrics_high, _ = compute_strategy(self.ret_risk, self.ret_safe, params_high_vol)
 
         # Different target vol should produce different Sharpe ratios
-        self.assertNotAlmostEqual(result_low['sharpe_strat'], result_high['sharpe_strat'], places=2)
+        self.assertNotAlmostEqual(metrics_low['sharpe_strat'], metrics_high['sharpe_strat'], places=2)
 
     def test_benchmark_unchanged_by_params(self):
         """Benchmark metrics should be identical regardless of strategy parameters."""
@@ -605,11 +612,11 @@ class TestComputeStrategy(unittest.TestCase):
         params_a = {**DEFAULT_PARAMS, 'target_vol': 15.0, 'max_lev': 3.0}
         params_b = {**DEFAULT_PARAMS, 'target_vol': 25.0, 'max_lev': 5.0}
 
-        result_a = compute_strategy(self.ret_risk, self.ret_safe, params_a)
-        result_b = compute_strategy(self.ret_risk, self.ret_safe, params_b)
+        metrics_a, _ = compute_strategy(self.ret_risk, self.ret_safe, params_a)
+        metrics_b, _ = compute_strategy(self.ret_risk, self.ret_safe, params_b)
 
-        self.assertAlmostEqual(result_a['bench_ret'], result_b['bench_ret'], places=6)
-        self.assertAlmostEqual(result_a['sharpe_bench'], result_b['sharpe_bench'], places=6)
+        self.assertAlmostEqual(metrics_a['bench_ret'], metrics_b['bench_ret'], places=6)
+        self.assertAlmostEqual(metrics_a['sharpe_bench'], metrics_b['sharpe_bench'], places=6)
 
 
 class TestAggregationalGaussianity(unittest.TestCase):
@@ -712,6 +719,482 @@ class TestAggregationalGaussianity(unittest.TestCase):
 
         self.assertTrue(result['convergence_confirmed'],
                         "Heavy-tailed data should show convergence toward Gaussianity.")
+
+
+class TestIntermittency(unittest.TestCase):
+    """
+    Tests for Intermittency (Stylized Fact 6):
+    Extreme returns cluster in bursts rather than being uniformly scattered.
+    Measured by the Fano Factor: F = Var(counts) / Mean(counts) on extreme event counts per block.
+    F >> 1 = bursty (intermittent), F ≈ 1 = Poisson (random), F < 1 = regular.
+    """
+
+    def setUp(self):
+        np.random.seed(42)
+
+    def test_clustered_extremes_high_fano(self):
+        """
+        Construct data where extreme returns are clustered into bursts.
+        Block 1: all extremes. Blocks 2-10: no extremes.
+        Fano factor must be >> 1.
+        """
+        # 10 blocks of 100 each = 1000 points
+        # Block 1: 50 extreme values, rest normal
+        # Blocks 2-10: all normal (tiny values)
+        block_size = 100
+        burst_block = np.concatenate([np.random.normal(0, 0.001, 50), np.random.normal(0, 0.10, 50)])
+        calm_block = np.random.normal(0, 0.001, 100)
+        data = np.concatenate([burst_block] + [calm_block] * 9)
+        returns = pd.Series(data)
+
+        im = Intermittency(returns, "TEST_CLUSTERED")
+        result = im.compute_intermittency(quantile=0.99, block_size=block_size, plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertGreater(result['fano_factor'], 1.0,
+                           "Clustered extremes must produce Fano Factor > 1.")
+
+    def test_uniform_extremes_fano_near_one(self):
+        """
+        Construct data where extreme returns are uniformly scattered (1 per block).
+        Fano factor should be near 1 or below (not bursty).
+        """
+        np.random.seed(123)
+        block_size = 100
+        n_blocks = 20
+        blocks = []
+        for _ in range(n_blocks):
+            block = np.random.normal(0, 0.001, block_size)
+            # Place exactly 1 extreme in each block
+            block[np.random.randint(0, block_size)] = 0.50
+            blocks.append(block)
+        data = np.concatenate(blocks)
+        returns = pd.Series(data)
+
+        im = Intermittency(returns, "TEST_UNIFORM")
+        result = im.compute_intermittency(quantile=0.99, block_size=block_size, plot=False)
+
+        self.assertIsNotNone(result)
+        # Uniform distribution of extremes: Fano should be <= 1
+        self.assertLessEqual(result['fano_factor'], 1.5,
+                             "Uniformly scattered extremes should NOT produce high Fano Factor.")
+
+    def test_return_structure(self):
+        """
+        Result dict must contain required keys with correct types.
+        """
+        data = pd.Series(np.random.standard_t(df=3, size=5000) * 0.01)
+
+        im = Intermittency(data, "TEST_STRUCT")
+        result = im.compute_intermittency(quantile=0.99, block_size=100, plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertIn('fano_factor', result)
+        self.assertIn('threshold', result)
+        self.assertIn('n_extremes', result)
+        self.assertIn('n_blocks', result)
+        self.assertIn('mean_count', result)
+        self.assertIn('var_count', result)
+        self.assertIn('intermittent', result)
+
+        self.assertIsInstance(result['fano_factor'], float)
+        self.assertIsInstance(result['threshold'], float)
+        self.assertIsInstance(result['n_extremes'], int)
+        self.assertIsInstance(result['n_blocks'], int)
+        self.assertIsInstance(result['intermittent'], bool)
+        self.assertFalse(np.isnan(result['fano_factor']))
+
+    def test_regime_switching_data_is_intermittent(self):
+        """
+        Regime-switching data (high-vol then low-vol blocks) should exhibit
+        intermittency: extremes cluster in the high-vol regime.
+        This is the core stylized fact: real financial data has bursty volatility.
+        """
+        # 5 high-vol blocks + 5 low-vol blocks, each 500 points
+        high_vol = np.random.normal(0, 0.05, 2500)
+        low_vol = np.random.normal(0, 0.001, 2500)
+        data = pd.Series(np.concatenate([high_vol, low_vol]))
+
+        im = Intermittency(data, "TEST_REGIME")
+        result = im.compute_intermittency(quantile=0.99, block_size=500, plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result['intermittent'],
+                        "Regime-switching data should be flagged as intermittent.")
+        self.assertGreater(result['fano_factor'], 1.0)
+
+    def test_gaussian_data_not_intermittent(self):
+        """
+        Pure Gaussian data has no volatility clustering.
+        Extreme events should be Poisson-distributed (F ≈ 1).
+        """
+        data = pd.Series(np.random.normal(0, 0.01, 20000))
+
+        im = Intermittency(data, "TEST_GAUSS")
+        result = im.compute_intermittency(quantile=0.99, block_size=200, plot=False)
+
+        self.assertIsNotNone(result)
+        # Gaussian extremes are approximately Poisson: F should be near 1
+        self.assertLess(result['fano_factor'], 3.0,
+                        "Gaussian data should not show strong intermittency.")
+
+    def test_robustness_nan_inf(self):
+        """
+        Intermittency should handle NaN/Inf without crashing.
+        """
+        clean = np.random.normal(0, 0.01, 1000)
+        dirty = np.concatenate([clean, [np.nan] * 50, [np.inf] * 50, [-np.inf] * 50])
+        np.random.shuffle(dirty)
+        data = pd.Series(dirty)
+
+        im = Intermittency(data, "ROBUST")
+        try:
+            result = im.compute_intermittency(quantile=0.95, block_size=50, plot=False)
+            self.assertIsNotNone(result)
+            self.assertIn('fano_factor', result)
+        except Exception as e:
+            self.fail(f"Intermittency CRASHED on NaN/Inf data: {e}")
+
+    def test_insufficient_data_returns_none(self):
+        """
+        If data is too short for the given block_size, should return None.
+        """
+        data = pd.Series([0.01, -0.01, 0.02])
+
+        im = Intermittency(data, "TEST_SHORT")
+        result = im.compute_intermittency(quantile=0.99, block_size=100, plot=False)
+
+        self.assertIsNone(result)
+
+
+class TestSlowDecay(unittest.TestCase):
+    """
+    Tests for Slow Decay of Autocorrelation (Stylized Fact 7):
+    C_alpha(tau) = Corr(|r_t|^alpha, |r_{t+tau}|^alpha) decays as A * tau^(-beta).
+    Indicator: 0.2 <= beta <= 0.4. Computed for both alpha=1 and alpha=2.
+    """
+
+    def setUp(self):
+        np.random.seed(42)
+        # GARCH(1,1) with persistence=0.95: slowly decaying ACF for |r|
+        n = 5000
+        alpha0, alpha1, beta1 = 0.00001, 0.05, 0.90
+        h = np.zeros(n)
+        r = np.zeros(n)
+        h[0] = alpha0 / (1 - alpha1 - beta1)
+        for t in range(1, n):
+            h[t] = alpha0 + alpha1 * r[t - 1] ** 2 + beta1 * h[t - 1]
+            r[t] = np.sqrt(h[t]) * np.random.normal()
+        self.garch_returns = pd.Series(r)
+
+        # IID Gaussian: no autocorrelation in |r|
+        self.iid_returns = pd.Series(np.random.normal(0, 0.01, 5000))
+
+        # Dirty data
+        clean = np.random.normal(0, 0.01, 1000)
+        dirty = np.concatenate([clean, [np.nan] * 50, [np.inf] * 50, [-np.inf] * 50])
+        np.random.shuffle(dirty)
+        self.dirty_returns = pd.Series(dirty)
+
+    def test_return_structure(self):
+        """Result dict must contain required keys with correct types."""
+        sd = SlowDecay(self.garch_returns, "TEST")
+        result = sd.compute_decay(max_lag=50, plot=False)
+
+        self.assertIsNotNone(result)
+        required_keys = ['beta_alpha1', 'A_alpha1', 'beta_alpha2', 'A_alpha2',
+                         'acf_alpha1', 'acf_alpha2', 'lags', 'slow_decay_confirmed']
+        for key in required_keys:
+            self.assertIn(key, result, f"Missing key: {key}")
+        self.assertIsInstance(result['slow_decay_confirmed'], bool)
+        self.assertIsInstance(result['lags'], list)
+        self.assertIsInstance(result['acf_alpha1'], list)
+        self.assertIsInstance(result['acf_alpha2'], list)
+        self.assertEqual(len(result['lags']), 50)
+        self.assertEqual(len(result['acf_alpha1']), 50)
+
+    def test_both_alphas_computed(self):
+        """Both alpha=1 and alpha=2 regression betas must be present and non-None."""
+        sd = SlowDecay(self.garch_returns, "TEST")
+        result = sd.compute_decay(max_lag=50, plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(result['beta_alpha1'], "beta for alpha=1 should be computed")
+        self.assertIsNotNone(result['beta_alpha2'], "beta for alpha=2 should be computed")
+        self.assertIsNotNone(result['A_alpha1'])
+        self.assertIsNotNone(result['A_alpha2'])
+
+    def test_acf_positive_at_lag1_for_garch(self):
+        """GARCH absolute returns must have positive ACF at lag 1 (volatility persists)."""
+        sd = SlowDecay(self.garch_returns, "TEST_GARCH")
+        result = sd.compute_decay(max_lag=50, plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertGreater(result['acf_alpha1'][0], 0.0,
+                           "GARCH |returns| must have positive ACF at lag 1.")
+
+    def test_beta_positive_for_garch(self):
+        """Beta exponent must be positive (ACF decays from positive values)."""
+        sd = SlowDecay(self.garch_returns, "TEST_GARCH")
+        result = sd.compute_decay(max_lag=50, plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertGreater(result['beta_alpha1'], 0,
+                           "Beta must be positive (ACF decays with increasing lag).")
+        self.assertGreater(result['beta_alpha2'], 0,
+                           "Beta for squared returns must also be positive.")
+
+    def test_robustness_nan_inf(self):
+        """SlowDecay should handle NaN/Inf input without crashing."""
+        sd = SlowDecay(self.dirty_returns, "ROBUST")
+        try:
+            result = sd.compute_decay(max_lag=20, plot=False)
+            if result is not None:
+                self.assertIn('slow_decay_confirmed', result)
+        except Exception as e:
+            self.fail(f"SlowDecay CRASHED on NaN/Inf data: {e}")
+
+    def test_insufficient_data_returns_none(self):
+        """Data shorter than 2*max_lag should return None."""
+        data = pd.Series([0.01, -0.01, 0.02, -0.02, 0.01])
+        sd = SlowDecay(data, "TEST_SHORT")
+        result = sd.compute_decay(max_lag=50, plot=False)
+        self.assertIsNone(result)
+
+
+class TestLeverageEffect(unittest.TestCase):
+    """
+    Tests for Leverage Effect (Stylized Fact 8):
+    L(tau) = Corr(r_t, r²_{t+tau}) for tau in [-max_lag, max_lag].
+    Indicator: L(tau) < 0 for small positive tau (negative returns predict higher future vol).
+    """
+
+    def setUp(self):
+        np.random.seed(42)
+        # Constructed leverage: crash (r0 = -1.0) → high future vol, gain → low vol
+        n_events = 500
+        returns = []
+        for _ in range(n_events):
+            r0 = np.random.choice([-1.0, 1.0])
+            future_vol = 0.5 if r0 < 0 else 0.001
+            returns.append(r0)
+            returns.extend(np.random.normal(0, future_vol, 4))
+        self.leverage_returns = pd.Series(returns[:2000])
+
+        # IID Gaussian: no leverage
+        self.iid_returns = pd.Series(np.random.normal(0, 0.01, 5000))
+
+        # Dirty data
+        clean = np.random.normal(0, 0.01, 1000)
+        dirty = np.concatenate([clean, [np.nan] * 50, [np.inf] * 50, [-np.inf] * 50])
+        np.random.shuffle(dirty)
+        self.dirty_returns = pd.Series(dirty)
+
+    def test_return_structure(self):
+        """Result dict must contain required keys with correct types."""
+        le = LeverageEffect(self.iid_returns, "TEST")
+        result = le.compute_leverage(max_lag=20, plot=False)
+
+        self.assertIsNotNone(result)
+        required_keys = ['lags', 'L_values', 'leverage_detected', 'min_L', 'min_lag']
+        for key in required_keys:
+            self.assertIn(key, result, f"Missing key: {key}")
+        self.assertIsInstance(result['leverage_detected'], bool)
+        self.assertIsInstance(result['lags'], list)
+        self.assertIsInstance(result['L_values'], list)
+        self.assertIsInstance(result['min_L'], float)
+        self.assertIsInstance(result['min_lag'], int)
+
+    def test_lags_span_negative_to_positive(self):
+        """Lags must span from -max_lag to +max_lag inclusive (2*max_lag+1 values)."""
+        le = LeverageEffect(self.iid_returns, "TEST")
+        result = le.compute_leverage(max_lag=30, plot=False)
+
+        self.assertIsNotNone(result)
+        lags = result['lags']
+        self.assertEqual(min(lags), -30)
+        self.assertEqual(max(lags), 30)
+        self.assertEqual(len(lags), 61)  # -30..0..+30
+
+    def test_leverage_detected_for_asymmetric_data(self):
+        """Crash→high_vol data must show L(tau) meaningfully < 0 for positive tau."""
+        le = LeverageEffect(self.leverage_returns, "TEST_LEVERAGE")
+        result = le.compute_leverage(max_lag=10, plot=False)
+
+        self.assertIsNotNone(result)
+        lags = np.array(result['lags'])
+        L_arr = np.array(result['L_values'])
+        pos_L = L_arr[lags > 0]
+
+        self.assertTrue(np.any(pos_L < 0),
+                        "Crash→vol data must have at least one L(tau) < 0 for tau > 0.")
+        self.assertLess(float(np.nanmin(pos_L)), -0.1,
+                        "Leverage effect must be substantial (min L < -0.1) for constructed data.")
+
+    def test_iid_data_no_strong_leverage(self):
+        """IID Gaussian data should not produce strongly negative L values."""
+        le = LeverageEffect(self.iid_returns, "TEST_IID")
+        result = le.compute_leverage(max_lag=20, plot=False)
+
+        self.assertIsNotNone(result)
+        lags = np.array(result['lags'])
+        L_arr = np.array(result['L_values'])
+        pos_L = L_arr[lags > 0]
+
+        self.assertGreater(float(np.nanmin(pos_L)), -0.1,
+                           "IID data should not show strong leverage (min L should be > -0.1).")
+
+    def test_robustness_nan_inf(self):
+        """LeverageEffect should handle NaN/Inf input without crashing."""
+        le = LeverageEffect(self.dirty_returns, "ROBUST")
+        try:
+            result = le.compute_leverage(max_lag=10, plot=False)
+            if result is not None:
+                self.assertIn('leverage_detected', result)
+        except Exception as e:
+            self.fail(f"LeverageEffect CRASHED on NaN/Inf data: {e}")
+
+    def test_insufficient_data_returns_none(self):
+        """Data shorter than 2*max_lag should return None."""
+        data = pd.Series([0.01, -0.01, 0.02])
+        le = LeverageEffect(data, "TEST_SHORT")
+        result = le.compute_leverage(max_lag=50, plot=False)
+        self.assertIsNone(result)
+
+
+class TestVolVolCorr(unittest.TestCase):
+    """
+    Tests for Volume-Volatility Correlation (Stylized Fact 9):
+    Trading volume V_t is positively correlated with price volatility |r_t|.
+
+    Tested for both volatility proxies:
+      rho_abs = Corr(V_t, |r_t|)
+      rho_sq  = Corr(V_t, r_t^2)
+
+    Significance via Pearson t-test:
+      t = rho * sqrt(n - 2) / sqrt(1 - rho^2)
+    One-sided p-value (H1: rho > 0).
+    """
+
+    def setUp(self):
+        np.random.seed(42)
+        n = 2000
+
+        # Correlated data: volume scales with absolute returns
+        abs_vol = np.abs(np.random.normal(0, 0.02, n))  # daily volatility magnitude
+        signs = np.random.choice([-1, 1], n)
+        self.corr_returns = pd.Series(abs_vol * signs)
+        self.corr_volume = pd.Series(abs_vol * 1e7 + np.random.normal(0, 1e4, n))
+
+        # IID: volume and returns are independent
+        self.iid_returns = pd.Series(np.random.normal(0, 0.01, n))
+        self.iid_volume = pd.Series(np.random.normal(1e6, 1e4, n))
+
+        # Dirty data: NaN and Inf mixed in
+        clean_r = np.random.normal(0, 0.01, 500)
+        clean_v = np.abs(clean_r) * 1e7 + np.random.normal(0, 1e4, 500)
+        dirty_r = np.concatenate([clean_r, [np.nan] * 30, [np.inf] * 20, [-np.inf] * 20])
+        dirty_v = np.concatenate([clean_v, [np.nan] * 30, [np.nan] * 20, [np.nan] * 20])
+        self.dirty_returns = pd.Series(dirty_r)
+        self.dirty_volume = pd.Series(dirty_v)
+
+    def test_return_structure(self):
+        """Result dict must contain all required keys with correct types."""
+        vvc = VolVolCorr(self.iid_returns, self.iid_volume, "TEST")
+        result = vvc.compute_correlation(plot=False)
+
+        self.assertIsNotNone(result)
+        required_keys = [
+            'rho_abs', 't_abs', 'pval_abs', 'significant_abs',
+            'rho_sq', 't_sq', 'pval_sq', 'significant_sq',
+            'corr_confirmed',
+        ]
+        for key in required_keys:
+            self.assertIn(key, result, f"Missing key: {key}")
+        self.assertIsInstance(result['rho_abs'], float)
+        self.assertIsInstance(result['t_abs'], float)
+        self.assertIsInstance(result['pval_abs'], float)
+        self.assertIsInstance(result['significant_abs'], bool)
+        self.assertIsInstance(result['rho_sq'], float)
+        self.assertIsInstance(result['t_sq'], float)
+        self.assertIsInstance(result['pval_sq'], float)
+        self.assertIsInstance(result['significant_sq'], bool)
+        self.assertIsInstance(result['corr_confirmed'], bool)
+
+    def test_positive_correlation_detected(self):
+        """
+        Volume proportional to |r| must produce rho_abs > 0 with p < 0.05.
+        Same for rho_sq (volume proportional to r^2 as well).
+        """
+        vvc = VolVolCorr(self.corr_returns, self.corr_volume, "TEST_CORR")
+        result = vvc.compute_correlation(plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertGreater(result['rho_abs'], 0.5,
+                           "rho_abs must be strongly positive when volume ~ |r|")
+        self.assertLess(result['pval_abs'], 0.05,
+                        "Correlation must be statistically significant for constructed data")
+        self.assertTrue(result['significant_abs'],
+                        "significant_abs must be True when rho > 0 and p < 0.05")
+        self.assertTrue(result['corr_confirmed'])
+
+    def test_t_statistic_formula(self):
+        """
+        Verify t = rho * sqrt(n-2) / sqrt(1 - rho^2) is computed correctly.
+        Compute expected value manually using np.corrcoef, then compare with output.
+        """
+        np.random.seed(7)
+        n = 300
+        abs_v = np.abs(np.random.normal(0, 0.02, n))
+        returns = pd.Series(abs_v * np.random.choice([-1, 1], n))
+        volume = pd.Series(abs_v * 1e6 + np.random.normal(0, 5000, n))
+
+        # Manual computation
+        abs_r = np.abs(returns.values)
+        v = volume.values
+        expected_rho_abs = float(np.corrcoef(v, abs_r)[0, 1])
+        expected_t_abs = expected_rho_abs * np.sqrt(n - 2) / np.sqrt(1 - expected_rho_abs ** 2)
+
+        vvc = VolVolCorr(returns, volume, "TEST_FORMULA")
+        result = vvc.compute_correlation(plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result['rho_abs'], expected_rho_abs, places=6,
+                               msg="rho_abs does not match np.corrcoef")
+        self.assertAlmostEqual(result['t_abs'], expected_t_abs, places=4,
+                               msg="t_abs does not match ρ*sqrt(n-2)/sqrt(1-ρ²)")
+
+    def test_iid_data_not_significant(self):
+        """
+        Independent volume and returns must NOT show significant correlation.
+        """
+        vvc = VolVolCorr(self.iid_returns, self.iid_volume, "TEST_IID")
+        result = vvc.compute_correlation(plot=False)
+
+        self.assertIsNotNone(result)
+        self.assertGreater(result['pval_abs'], 0.05,
+                           "IID data should not produce significant p-value")
+        self.assertFalse(result['corr_confirmed'],
+                         "corr_confirmed must be False for independent data")
+
+    def test_robustness_nan_inf(self):
+        """VolVolCorr should handle NaN/Inf in either series without crashing."""
+        vvc = VolVolCorr(self.dirty_returns, self.dirty_volume, "ROBUST")
+        try:
+            result = vvc.compute_correlation(plot=False)
+            if result is not None:
+                self.assertIn('rho_abs', result)
+                self.assertFalse(np.isnan(result['rho_abs']))
+        except Exception as e:
+            self.fail(f"VolVolCorr CRASHED on NaN/Inf data: {e}")
+
+    def test_insufficient_data_returns_none(self):
+        """Data shorter than minimum should return None."""
+        data_r = pd.Series([0.01, -0.01, 0.02])
+        data_v = pd.Series([1e6, 2e6, 1.5e6])
+        vvc = VolVolCorr(data_r, data_v, "TEST_SHORT")
+        result = vvc.compute_correlation(plot=False)
+        self.assertIsNone(result)
 
 
 if __name__ == '__main__':

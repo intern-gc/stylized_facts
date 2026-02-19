@@ -14,7 +14,7 @@ class AbsenceOfAutocorrelationTest:
             print("❌ Error: Insufficient or missing returns data.")
             return []
 
-            # Convert to numpy, flatten, and filter bad data (Defensive Programming)
+        # Convert to numpy, flatten, and filter bad data (Defensive Programming)
         returns_array = np.asarray(self.returns).flatten()
         returns_array = returns_array[np.isfinite(returns_array)]
 

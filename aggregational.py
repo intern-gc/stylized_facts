@@ -41,7 +41,7 @@ class AggregationalGaussianity:
         - convergence_confirmed: bool (kurtosis decreases from first to last scale)
         """
         if scales is None:
-            scales = [1, 4, 7, 13, 26]
+            scales = [1, 4, 7, 10, 15, 20, 26]
 
         if len(self.returns) < max(scales) * 10:
             print(f"  Insufficient data for aggregational Gaussianity test.")

@@ -2,12 +2,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from data import DataManager
-import os
-from datetime import datetime, timedelta, time
 
 # --- CONFIGURATION ---
-RISK_TICKER = "SPY"
-SAFE_TICKER = "GLD"
+RISK_TICKER = "XLE"
+SAFE_TICKER = "BIL"
 INTERVAL = "1h"
 START_DATE, END_DATE = "2015-01-01", "2026-01-01"
 
@@ -66,6 +64,12 @@ def calc_mdd(prices):
     peak = prices.cummax()
     drawdown = (prices - peak) / peak
     return drawdown.min()
+
+
+def slice_returns(ret_series, start, end):
+    """Slice a return series to a date range."""
+    mask = (ret_series.index >= start) & (ret_series.index < end)
+    return ret_series[mask]
 
 
 def compute_strategy(ret_risk, ret_safe, params):
@@ -147,7 +151,7 @@ def compute_strategy(ret_risk, ret_safe, params):
         'mdd_bench': float(mdd_bench),
         'vol_strat': float(vol_strat),
         'vol_bench': float(vol_bench),
-    }
+    }, eval_data
 
 
 def run_rotation_strategy():
@@ -166,83 +170,43 @@ def run_rotation_strategy():
             print(f"❌ {SAFE_TICKER} failed: {report_safe}")
         return
 
-    # Use pd.concat for safer alignment
-    data = pd.concat([
+    # Alignment info
+    aligned = pd.concat([
         pd.Series(ret_risk, name='Ret_Risk'),
         pd.Series(ret_safe, name='Ret_Safe')
     ], axis=1).dropna()
 
     print(f"  📊 DATA CHECK: {RISK_TICKER}({len(ret_risk)} bars) | {SAFE_TICKER}({len(ret_safe)} bars)")
-    print(f"  📊 OVERLAP: {len(data)} bars after alignment.")
+    print(f"  📊 OVERLAP: {len(aligned)} bars after alignment.")
 
-    if data.empty:
+    if aligned.empty:
         print("❌ Error: No timestamp overlap between assets!")
         return
 
-    # 2. CALCULATE SIGNAL
-    data['Raw_Vol'] = data['Ret_Risk'].rolling(VOL_WINDOW).std() * np.sqrt(1638) * 100
-    data['Syn_VIX'] = data['Raw_Vol'].rolling(SMOOTH_WINDOW).mean()
-    data['VIX_MA'] = data['Syn_VIX'].rolling(BASELINE_WINDOW).mean()
+    # Run core strategy (reuses compute_strategy instead of duplicating logic)
+    result = compute_strategy(ret_risk, ret_safe, DEFAULT_PARAMS)
+    if result is None:
+        print("❌ Strategy computation failed.")
+        return
 
-    # 3. DEFINE REGIME
-    data['Regime'] = np.where(data['Syn_VIX'] > data['VIX_MA'], 0.0, 1.0)
-    data['Signal'] = data['Regime'].shift(1).fillna(1.0)
-
-    # 4. DYNAMIC LEVERAGE (vol-targeted) with hysteresis
-    data['Syn_VIX_Lagged'] = data['Syn_VIX'].shift(1)
-    data['Syn_VIX_Lagged'] = data['Syn_VIX_Lagged'].fillna(data['Syn_VIX_Lagged'].bfill())
-    data['Syn_VIX_Lagged'] = data['Syn_VIX_Lagged'].fillna(20.0)  # Initial leverage = 1x
-    data['Dyn_Leverage'] = calc_dynamic_leverage(data['Syn_VIX_Lagged'], TARGET_VOL, MIN_LEV, MAX_LEV)
-    # Ideal effective leverage: full leverage in bull, 0 in safe
-    data['Ideal_Leverage'] = data['Signal'] * data['Dyn_Leverage']
-    # Apply hysteresis: only rebalance when ideal deviates >HYSTERESIS from last trade
-    data['Eff_Leverage'] = apply_hysteresis(data['Ideal_Leverage'], HYSTERESIS)
-
-    # 5. CALCULATE RETURNS
-    ann_factor = 1638
-    borrow_cost_per_bar = (0.05 / ann_factor) * (data['Eff_Leverage'] - 1).clip(lower=0)
-
-    # When Eff_Leverage > 0, we're in risk asset; when 0, we're in safe asset
-    in_risk = (data['Eff_Leverage'] > 0).astype(float)
-    risk_leg = data['Eff_Leverage'] * data['Ret_Risk'] - borrow_cost_per_bar * in_risk
-    safe_leg = (1 - in_risk) * data['Ret_Safe']
-
-    lev_delta = data['Eff_Leverage'].diff().abs().fillna(0)
-    txn_costs = (lev_delta * 2) * (COST_BPS / 10000)
-
-    data['Strat_Ret'] = risk_leg + safe_leg - txn_costs
-
-    # 5. EVALUATION
-    start_idx = max(VOL_WINDOW, BASELINE_WINDOW, SMOOTH_WINDOW) + 1
-    eval_data = data.iloc[start_idx:].copy()
-
-    eval_data['Eq_Strat'] = np.exp(eval_data['Strat_Ret'].cumsum())
-    eval_data['Eq_Bench'] = np.exp(eval_data['Ret_Risk'].cumsum())
+    metrics, eval_data = result
 
     # --- ADVANCED STATS ---
+    ann_factor = 1638
     years = len(eval_data) / ann_factor
 
-    # Returns & CAGR
-    total_ret = (eval_data['Eq_Strat'].iloc[-1] - 1) * 100
-    bench_ret = (eval_data['Eq_Bench'].iloc[-1] - 1) * 100
-    cagr_strat = (eval_data['Eq_Strat'].iloc[-1] ** (1 / years) - 1) * 100
-    cagr_bench = (eval_data['Eq_Bench'].iloc[-1] ** (1 / years) - 1) * 100
-
-    # Risk Metrics
-    mdd_strat = calc_mdd(eval_data['Eq_Strat']) * 100
-    mdd_bench = calc_mdd(eval_data['Eq_Bench']) * 100
-    vol_strat = eval_data['Strat_Ret'].std() * np.sqrt(ann_factor) * 100
-    vol_bench = eval_data['Ret_Risk'].std() * np.sqrt(ann_factor) * 100
-
-    # Sharpe (both)
-    sharpe_strat = (eval_data['Strat_Ret'].mean() / eval_data['Strat_Ret'].std()) * np.sqrt(ann_factor)
-    sharpe_bench = (eval_data['Ret_Risk'].mean() / eval_data['Ret_Risk'].std()) * np.sqrt(ann_factor)
-
-    # Sortino (downside deviation only)
-    strat_downside = eval_data['Strat_Ret'][eval_data['Strat_Ret'] < 0].std() * np.sqrt(ann_factor)
-    bench_downside = eval_data['Ret_Risk'][eval_data['Ret_Risk'] < 0].std() * np.sqrt(ann_factor)
-    sortino_strat = (eval_data['Strat_Ret'].mean() * ann_factor) / strat_downside if strat_downside > 0 else 0
-    sortino_bench = (eval_data['Ret_Risk'].mean() * ann_factor) / bench_downside if bench_downside > 0 else 0
+    total_ret = metrics['total_ret']
+    bench_ret = metrics['bench_ret']
+    cagr_strat = metrics['cagr_strat']
+    cagr_bench = metrics['cagr_bench']
+    mdd_strat = metrics['mdd_strat']
+    mdd_bench = metrics['mdd_bench']
+    vol_strat = metrics['vol_strat']
+    vol_bench = metrics['vol_bench']
+    sharpe_strat = metrics['sharpe_strat']
+    sharpe_bench = metrics['sharpe_bench']
+    sortino_strat = metrics['sortino_strat']
+    sortino_bench = metrics['sortino_bench']
 
     # Calmar (both)
     calmar_strat = cagr_strat / abs(mdd_strat) if mdd_strat != 0 else 0
@@ -261,7 +225,6 @@ def run_rotation_strategy():
     time_safe = safe_mask.mean() * 100
 
     # Win Rates (Hourly)
-    win_rate_total = (eval_data['Strat_Ret'] > 0).mean() * 100
     win_rate_bull = (eval_data[bull_mask]['Strat_Ret'] > 0).mean() * 100
     win_rate_safe = (eval_data[safe_mask]['Strat_Ret'] > 0).mean() * 100
 

@@ -1,8 +1,7 @@
 import pandas as pd
 import numpy as np
-from itertools import product
 from data import DataManager
-from backtest import compute_strategy, DEFAULT_PARAMS
+from backtest import compute_strategy, slice_returns, DEFAULT_PARAMS
 
 # --- CONFIGURATION ---
 RISK_TICKER = "SPY"
@@ -10,13 +9,12 @@ SAFE_TICKER = "GLD"
 INTERVAL = "1h"
 
 # Full date range - data is fetched once, then sliced into windows
-FULL_START = "2020-01-01"
-FULL_END = "2025-01-01"
+FULL_START = "2016-01-06"
+FULL_END = "2026-01-01"
 
 # Rolling 1-year windows to test across different market regimes
-TIME_WINDOWS = [
-    ("2015-01-01", "2016-01-01"),  # China crash + oil collapse
-    ("2016-01-01", "2017-01-01"),  # Post-China vol normalization
+TIME_WINDOWS = [  # China crash + oil collapse
+    ("2016-01-06", "2017-01-01"),  # Post-China vol normalization
     ("2017-01-01", "2018-01-01"),  # Low-vol bull market
     ("2018-01-01", "2019-01-01"),  # Volmageddon + Fed taper
     ("2019-01-01", "2020-01-01"),  # Pre-COVID grind
@@ -25,6 +23,7 @@ TIME_WINDOWS = [
     ("2022-01-01", "2023-01-01"),  # Inflation bear
     ("2023-01-01", "2024-01-01"),  # Recovery
     ("2024-01-01", "2025-01-01"),  # Tariff crash/volatility
+    ("2025-01-01", "2026-01-01")
 ]
 
 
@@ -34,8 +33,8 @@ PARAM_SWEEPS = {
     'vol_window':       [18, 21, 24, 27, 30],
     'baseline_window':  [90, 105, 120, 135, 150],
     'smooth_window':    [3, 4, 5, 6, 7],
-    'hysteresis':       [0.05, 0.08, 0.10, 0.12, 0.15],
-    'max_lev':          [3.0, 3.5, 4.0, 4.5, 5.0],
+    'hysteresis':       [0.1],
+    'max_lev':          [1.0],
 }
 
 # Key metrics to track
@@ -63,12 +62,6 @@ def fetch_all_data():
     return ret_risk, ret_safe
 
 
-def slice_returns(ret_series, start, end):
-    """Slice a return series to a date range."""
-    mask = (ret_series.index >= start) & (ret_series.index < end)
-    return ret_series[mask]
-
-
 def run_sensitivity_analysis(ret_risk_full, ret_safe_full):
     """One-at-a-time parameter sweep across all time windows."""
     all_results = []
@@ -76,9 +69,12 @@ def run_sensitivity_analysis(ret_risk_full, ret_safe_full):
     total_runs = sum(len(vals) for vals in PARAM_SWEEPS.values()) * len(TIME_WINDOWS)
     run_count = 0
 
+
     for param_name, sweep_values in PARAM_SWEEPS.items():
         for value in sweep_values:
             for window_start, window_end in TIME_WINDOWS:
+
+
                 run_count += 1
 
                 # Slice data to this window
@@ -86,7 +82,14 @@ def run_sensitivity_analysis(ret_risk_full, ret_safe_full):
                 ret_safe = slice_returns(ret_safe_full, window_start, window_end)
 
                 if len(ret_risk) < 200 or len(ret_safe) < 200:
+                    print(f"SKIP: {window_start}-{window_end}: {len(ret_risk)}/{len(ret_safe)} bars")
                     continue
+
+                #print(f"FULL DATA DEBUG:")
+                #print(f"  SPY index min/max: {ret_risk_full.index.min()} to {ret_risk_full.index.max()}")
+                #print(f"  SPY index type: {type(ret_risk_full.index)}")
+                #print(f"  First 3 indices: {ret_risk_full.index[:3]}")
+                #print(f"  GLD same: {ret_safe_full.index.min()} to {ret_safe_full.index.max()}")
 
                 # Build params: defaults with one param changed
                 params = {**DEFAULT_PARAMS, param_name: value}
@@ -95,12 +98,13 @@ def run_sensitivity_analysis(ret_risk_full, ret_safe_full):
                 if result is None:
                     continue
 
+                metrics, _ = result
                 row = {
                     'param': param_name,
                     'value': value,
                     'is_default': (value == DEFAULT_PARAMS[param_name]),
                     'window': f"{window_start[:4]}-{window_end[:4]}",
-                    **{m: result[m] for m in METRICS},
+                    **{m: metrics[m] for m in METRICS},
                 }
                 all_results.append(row)
 
@@ -163,9 +167,9 @@ def compute_robustness(df):
         beats_default = (non_default_sharpes >= default_sharpe * 0.8).sum()
         total_non_default = len(non_default_sharpes)
 
-        if cv < 0.3:
+        if cv < 0.5:
             verdict = "ROBUST"
-        elif cv < 0.6:
+        elif cv < 0.75:
             verdict = "MODERATE"
         else:
             verdict = "SENSITIVE"

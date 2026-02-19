@@ -1,16 +1,14 @@
 # yearly_tester.py
 import pandas as pd
-import numpy as np
 from data import DataManager
-from backtest import compute_strategy, DEFAULT_PARAMS
-from datetime import datetime
+from backtest import compute_strategy, slice_returns, DEFAULT_PARAMS
 import warnings
 
 warnings.filterwarnings('ignore')
 
 # CONFIGURATION
-RISK_TICKER = "TQQQ"  # Change to test others
-SAFE_TICKER = "BIL"
+RISK_TICKER = "SPY"  # Change to test others
+SAFE_TICKER = "GLD"
 INTERVAL = "1h"
 FULL_START = "2015-01-01"
 FULL_END = "2026-01-01"
@@ -28,12 +26,6 @@ YEARS = [
     ("2024-01-01", "2025-01-01"),  # Pre-tariff
     ("2025-01-01", "2026-01-01"),  # 2026 YTD (your concern)
 ]
-
-
-def slice_returns(ret_series, start, end):
-    """Slice return series to exact year."""
-    mask = (ret_series.index >= start) & (ret_series.index < end)
-    return ret_series[mask]
 
 
 def run_yearly_analysis():
@@ -61,11 +53,12 @@ def run_yearly_analysis():
             continue
 
         # Run backtest
-        metrics = compute_strategy(year_risk, year_safe, DEFAULT_PARAMS)
-        if metrics is None:
+        result = compute_strategy(year_risk, year_safe, DEFAULT_PARAMS)
+        if result is None:
             print(f"  ❌ Failed {year_start[:4]}")
             continue
 
+        metrics, _ = result
         results.append({
             'year': year_start[:4],
             'total_ret': metrics['total_ret'],
