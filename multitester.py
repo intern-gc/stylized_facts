@@ -19,17 +19,17 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 
 from data import DataManager
-from autocorrelation import AbsenceOfAutocorrelationTest
-from heavytails import HeavyTailsEVT
-from gainloss import GainLossAsymmetry
-from aggregational import AggregationalGaussianity
-from intermittency import Intermittency
-from volclustering import VolatilityClustering
-from conditional import ConditionalTails
-from decay import SlowDecay
-from leverage import LeverageEffect
-from volvolcorr import VolVolCorr
-from timescales import AsymmetryTimescales
+from tests.autocorrelation import AbsenceOfAutocorrelationTest
+from tests.heavytails import HeavyTailsEVT
+from tests.gainloss import GainLossAsymmetry
+from tests.aggregational import AggregationalGaussianity
+from tests.intermittency import Intermittency
+from tests.volclustering import VolatilityClustering
+from tests.conditional import ConditionalTails
+from tests.decay import SlowDecay
+from tests.leverage import LeverageEffect
+from tests.volvolcorr import VolVolCorr
+from tests.timescales import AsymmetryTimescales
 
 # ── USER CONFIGURATION ─────────────────────────────────────────────────────────
 TICKERS = [
