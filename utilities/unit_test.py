@@ -2,17 +2,17 @@ import unittest
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
-from tests.autocorrelation import AbsenceOfAutocorrelationTest
-from tests.heavytails import HeavyTailsEVT
-from tests.volclustering import VolatilityClustering
-from tests.gainloss import GainLossAsymmetry
-from tests.aggregational import AggregationalGaussianity
-from tests.intermittency import Intermittency
-from tests.decay import SlowDecay
-from tests.leverage import LeverageEffect
-from tests.volvolcorr import VolVolCorr
-from tests.timescales import AsymmetryTimescales
-from tests.conditional import ConditionalTails
+from facts_test.autocorrelation import AbsenceOfAutocorrelationTest
+from facts_test.heavytails import HeavyTailsEVT
+from facts_test.volclustering import VolatilityClustering
+from facts_test.gainloss import GainLossAsymmetry
+from facts_test.aggregational import AggregationalGaussianity
+from facts_test.intermittency import Intermittency
+from facts_test.decay import SlowDecay
+from facts_test.leverage import LeverageEffect
+from facts_test.volvolcorr import VolVolCorr
+from facts_test.timescales import AsymmetryTimescales
+from facts_test.conditional import ConditionalTails
 
 
 class TestStylizedFactsTheoretical(unittest.TestCase):
