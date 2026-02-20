@@ -16,7 +16,12 @@ class AbsenceOfAutocorrelationTest:
 
         # Convert to numpy, flatten, and filter bad data (Defensive Programming)
         returns_array = np.asarray(self.returns).flatten()
+        original_count = len(returns_array)
+
         returns_array = returns_array[np.isfinite(returns_array)]
+        dropped = original_count - len(returns_array)
+        if dropped > 0:
+            print(f"⚠️ WARNING: Dropped {dropped} non-finite values (NaN/Inf) for {self.ticker}.")
 
         if len(returns_array) < max(10, lags):
             print("❌ Error: Data too short after cleaning.")

@@ -58,7 +58,7 @@ class TestStylizedFactsTheoretical(unittest.TestCase):
     # TEST 3: ROBUSTNESS (Broken Data)
     def test_robustness_nans(self):
         # We feed the functions garbage: NaN (missing), Inf (infinity), -Inf.
-        # The functions should not crash — they should silently clean the data and keep going.
+        # The functions should not crash — drop the data, warn the user, and move on.
         robustness_data = pd.Series([1.0, np.nan, np.inf, -np.inf, 2.0, 3.0] * 10)
 
         ac_tester = AbsenceOfAutocorrelationTest(robustness_data, "ROBUST_ACF")
@@ -1109,6 +1109,158 @@ class TestConditionalTails(unittest.TestCase):
         result = ct.compute_conditional_tails(plot=False)
 
         self.assertIsNone(result)
+
+
+class TestAuditAndClean(unittest.TestCase):
+
+    def _make_df(self, rows):
+        # Helper: build a minimal OHLCV DataFrame from a list of dicts.
+        # Uses a simple DatetimeIndex so audit_and_clean has a real-looking input.
+        index = pd.date_range('2024-01-02', periods=len(rows), freq='D', tz='US/Eastern')
+        return pd.DataFrame(rows, index=index,
+                            columns=['Open', 'High', 'Low', 'Close', 'Volume'])
+
+    # TEST 56: AUDIT AND CLEAN (Clean Data Passes Through Unchanged)
+    def test_clean_data_no_issues(self):
+        # All bars are valid: prices positive, High >= Low, Close inside range, volume > 0.
+        # The report should say "DATA CLEAN" and no rows should be dropped.
+        from utilities.data import DataManager
+        rows = [
+            {'Open': 100, 'High': 105, 'Low': 99, 'Close': 103, 'Volume': 1000},
+            {'Open': 103, 'High': 107, 'Low': 102, 'Close': 106, 'Volume': 1500},
+            {'Open': 106, 'High': 110, 'Low': 105, 'Close': 108, 'Volume': 1200},
+        ]
+        df = self._make_df(rows)
+
+        dm = DataManager.__new__(DataManager)
+        cleaned_df, returns, report = dm.audit_and_clean(df, '1d')
+
+        self.assertEqual(len(cleaned_df), 3, "No rows should be dropped from clean data.")
+        self.assertIn('✅', report, f"Clean data should produce a clean report. Got: '{report}'")
+
+    # TEST 57: AUDIT AND CLEAN (NaN Values Forward-Filled)
+    def test_nan_values_forward_filled(self):
+        # One bar has NaN for Close. The function should forward-fill it from the previous bar
+        # and report how many NaNs were fixed — not crash or silently drop the row.
+        from utilities.data import DataManager
+        rows = [
+            {'Open': 100, 'High': 105, 'Low': 99,  'Close': 103,  'Volume': 1000},
+            {'Open': 103, 'High': 107, 'Low': 102, 'Close': np.nan, 'Volume': 1500},
+            {'Open': 103, 'High': 108, 'Low': 102, 'Close': 106,  'Volume': 1200},
+        ]
+        df = self._make_df(rows)
+
+        dm = DataManager.__new__(DataManager)
+        cleaned_df, returns, report = dm.audit_and_clean(df, '1d')
+
+        self.assertEqual(len(cleaned_df), 3, "NaN rows should be filled, not dropped.")
+        self.assertFalse(cleaned_df['Close'].isna().any(), "No NaNs should remain after forward-fill.")
+        self.assertIn('NaN', report, f"Report must mention NaN fix. Got: '{report}'")
+
+    # TEST 58: AUDIT AND CLEAN (Negative Prices Dropped)
+    def test_negative_price_rows_dropped(self):
+        # One bar has a negative Close price (-5). That's impossible for a stock.
+        # The row must be removed entirely, and the report must say it was dropped.
+        from utilities.data import DataManager
+        rows = [
+            {'Open': 100, 'High': 105, 'Low': 99,  'Close': 103, 'Volume': 1000},
+            {'Open': 103, 'High': 107, 'Low': -10, 'Close': -5,  'Volume': 1500},
+            {'Open': 103, 'High': 108, 'Low': 102, 'Close': 106, 'Volume': 1200},
+        ]
+        df = self._make_df(rows)
+
+        dm = DataManager.__new__(DataManager)
+        cleaned_df, returns, report = dm.audit_and_clean(df, '1d')
+
+        self.assertEqual(len(cleaned_df), 2, "The row with a negative price must be dropped.")
+        self.assertIn('negative', report.lower(), f"Report must mention negative prices. Got: '{report}'")
+
+    # TEST 59: AUDIT AND CLEAN (Zero Close Price Dropped)
+    def test_zero_close_price_dropped(self):
+        # One bar has Close = 0. This is almost always a bad data point, not a real price.
+        # The row must be removed, and the report must say so.
+        from utilities.data import DataManager
+        rows = [
+            {'Open': 100, 'High': 105, 'Low': 99,  'Close': 103, 'Volume': 1000},
+            {'Open': 103, 'High': 107, 'Low': 102, 'Close': 0,   'Volume': 1500},
+            {'Open': 103, 'High': 108, 'Low': 102, 'Close': 106, 'Volume': 1200},
+        ]
+        df = self._make_df(rows)
+
+        dm = DataManager.__new__(DataManager)
+        cleaned_df, returns, report = dm.audit_and_clean(df, '1d')
+
+        self.assertEqual(len(cleaned_df), 2, "The row with zero close must be dropped.")
+        self.assertIn('zero close', report.lower(), f"Report must mention zero close. Got: '{report}'")
+
+    # TEST 60: AUDIT AND CLEAN (Broken OHLC Dropped)
+    def test_broken_ohlc_dropped(self):
+        # One bar has High < Low (107 < 102 is impossible — the high can't be below the low).
+        # Another has Close > High (110 > 108), which is also impossible.
+        # Both rows must be dropped, and the report must mention OHLC.
+        from utilities.data import DataManager
+        rows = [
+            {'Open': 100, 'High': 105, 'Low': 99,  'Close': 103, 'Volume': 1000},
+            {'Open': 103, 'High': 102, 'Low': 107, 'Close': 104, 'Volume': 1500},  # High < Low
+            {'Open': 106, 'High': 108, 'Low': 105, 'Close': 110, 'Volume': 1200},  # Close > High
+            {'Open': 108, 'High': 112, 'Low': 107, 'Close': 111, 'Volume': 900},
+        ]
+        df = self._make_df(rows)
+
+        dm = DataManager.__new__(DataManager)
+        cleaned_df, returns, report = dm.audit_and_clean(df, '1d')
+
+        self.assertEqual(len(cleaned_df), 2, "Both broken OHLC rows must be dropped.")
+        self.assertIn('OHLC', report, f"Report must mention OHLC issue. Got: '{report}'")
+
+    # TEST 61: AUDIT AND CLEAN (Zero Volume Warns but Keeps Row)
+    def test_zero_volume_warns_but_keeps_row(self):
+        # One bar has Volume = 0. This is suspicious (no trades?) but not necessarily wrong —
+        # could be a market halt or a pre/post-market artifact.
+        # The row must stay in the data, but the report must warn about it.
+        from utilities.data import DataManager
+        rows = [
+            {'Open': 100, 'High': 105, 'Low': 99,  'Close': 103, 'Volume': 1000},
+            {'Open': 103, 'High': 107, 'Low': 102, 'Close': 106, 'Volume': 0},
+            {'Open': 106, 'High': 110, 'Low': 105, 'Close': 108, 'Volume': 1200},
+        ]
+        df = self._make_df(rows)
+
+        dm = DataManager.__new__(DataManager)
+        cleaned_df, returns, report = dm.audit_and_clean(df, '1d')
+
+        self.assertEqual(len(cleaned_df), 3, "Zero-volume rows must be kept, not dropped.")
+        self.assertIn('zero volume', report.lower(), f"Report must warn about zero volume. Got: '{report}'")
+
+    # TEST 62: AUDIT AND CLEAN (V-Spike Repaired for Intraday Data)
+    def test_vspike_repaired_intraday(self):
+        # A V-spike is a bar that shoots to a crazy price then immediately snaps back.
+        # Example: 200 normal bars at ~$100, then one bar at $10,000, then right back to $100.
+        # That $10,000 bar is a data error — no real trade moved the price 100x in one minute.
+        # We need MANY normal bars so the standard deviation stays small. With only 10 bars,
+        # the two spike bars dominate std and the filter never triggers (spike / std < 5).
+        # With 200 normal bars, std is tiny and log(10000/100) = 4.6 >> 5 * std.
+        from utilities.data import DataManager
+        n_normal = 100
+        normal_price = 100.0
+        spike_price = 10000.0
+        normal_closes = [normal_price] * n_normal + [spike_price, normal_price] + [normal_price] * n_normal
+        n_total = len(normal_closes)
+        idx = pd.date_range('2024-01-02 09:30', periods=n_total, freq='1min', tz='US/Eastern')
+        df = pd.DataFrame({
+            'Open':   normal_closes,
+            'High':   [c + 0.5 for c in normal_closes],
+            'Low':    [c - 0.5 for c in normal_closes],
+            'Close':  normal_closes,
+            'Volume': [1000] * n_total,
+        }, index=idx)
+
+        dm = DataManager.__new__(DataManager)
+        cleaned_df, returns, report = dm.audit_and_clean(df, '1m')
+
+        self.assertIn('V-Spike', report, f"Report must mention V-Spike repair. Got: '{report}'")
+        self.assertLess(cleaned_df['Close'].max(), 200.0,
+                        "After repair, the spike value of 10000 must be replaced.")
 
 
 if __name__ == '__main__':

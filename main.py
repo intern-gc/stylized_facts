@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 def run_analysis():
     # --- CONFIGURATION ---
     ticker = "IWM"
-    interval = "1d"  # Try "1m", "5m", "1h", or "1d"
+    interval = "1m"  # Try "1m", "5m", "1h", or "1d"
 
     # Adjust dates based on timeframe to ensure enough data
     start_date = "2015-01-01"  # Daily needs ~5 years for good EVT

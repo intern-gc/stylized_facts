@@ -181,12 +181,26 @@ class DataManager:
                     (np.abs(np.roll(r_arr, -1) + r_arr) < std)
                 )[0]
                 if len(spike_idx) > 0:
-                    c_df.iloc[spike_idx] = np.nan
+                    # returns[k] = log(close[k+1] / close[k]), so the spike BAR
+                    # is at position k+1 in c_df, not k. Null that bar then ffill.
+                    bar_idx = np.clip(spike_idx + 1, 0, len(c_df) - 1)
+                    c_df.iloc[bar_idx] = np.nan
                     c_df = c_df.ffill()
                     returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
                     issues.append(f"REPAIRED: {len(spike_idx)} V-Spikes")
 
         # --- BUILD REPORT ---
-        parts = issues + warnings
-        report = "✅ DATA CLEAN" if not parts else " | ".join(parts)
+        # Always show counts for every check so you can see at a glance what was found,
+        # even when nothing was wrong (e.g. "NaNs: 0 | Neg prices: 0 | ...").
+        summary = (
+            f"NaNs: {nan_count} | "
+            f"Neg prices: {n_neg} | "
+            f"Zero close: {n_zero_close} | "
+            f"Bad OHLC: {n_ohlc_bad} | "
+            f"Zero vol: {n_zero_vol}"
+        )
+        if issues or warnings:
+            report = " | ".join(issues + warnings) + f" [{summary}]"
+        else:
+            report = f"✅ DATA CLEAN [{summary}]"
         return c_df, returns, report
