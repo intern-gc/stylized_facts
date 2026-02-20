@@ -17,9 +17,7 @@ from facts_test.conditional import ConditionalTails
 
 class TestStylizedFactsTheoretical(unittest.TestCase):
 
-    # ==========================================
     # TEST 1: AUTOCORRELATION (Theoretical Check)
-    # ==========================================
     def test_acf_exact_value(self):
         # Data: 1, -1, 1, -1, ... forever
         # Each value is the opposite of the one before it.
@@ -34,9 +32,7 @@ class TestStylizedFactsTheoretical(unittest.TestCase):
 
         self.assertIn(1, sig_lags, "Perfectly alternating data [1, -1] must have lag 1 flagged as significant.")
 
-    # ==========================================
     # TEST 2: HEAVY TAILS (Theoretical Check)
-    # ==========================================
     def test_evt_exact_parameters(self):
         # We generate data from a known heavy-tail distribution (Fréchet) with alpha = 2.
         # Alpha measures "how fat" the tail is. Lower alpha = fatter tail.
@@ -59,9 +55,7 @@ class TestStylizedFactsTheoretical(unittest.TestCase):
                                msg="EVT must recover alpha=2 from data we literally generated with alpha=2.")
         self.assertGreater(xi, 0, "Xi > 0 means heavy tails exist.")
 
-    # ==========================================
     # TEST 3: ROBUSTNESS (Broken Data)
-    # ==========================================
     def test_robustness_nans(self):
         # We feed the functions garbage: NaN (missing), Inf (infinity), -Inf.
         # The functions should not crash — they should silently clean the data and keep going.
@@ -79,9 +73,7 @@ class TestStylizedFactsTheoretical(unittest.TestCase):
         except Exception as e:
             self.fail(f"EVT crashed on bad data: {e}")
 
-    # ==========================================
     # TEST 4: VOLATILITY CLUSTERING (Positive)
-    # ==========================================
     def test_volclustering_regime_switching(self):
         # We create 500 wild/volatile returns followed by 500 tiny/calm returns.
         # This mimics a market crash followed by a quiet period.
@@ -100,9 +92,7 @@ class TestStylizedFactsTheoretical(unittest.TestCase):
         self.assertGreater(len(sig_lags), 0, "Volatile-then-calm data must show volatility clustering.")
         self.assertGreater(c2_values[1], 0.1, "C2 at lag 1 must be strongly positive for regime-switching data.")
 
-    # ==========================================
     # TEST 5: VOLATILITY CLUSTERING (Negative)
-    # ==========================================
     def test_volclustering_iid_returns(self):
         # Pure random (iid) Gaussian returns: every day is independent of every other day.
         # Squaring them and computing autocorrelation should give mostly noise (near zero).
@@ -119,6 +109,7 @@ class TestStylizedFactsTheoretical(unittest.TestCase):
 
 class TestGainLossAsymmetry(unittest.TestCase):
 
+    # TEST 6: GAIN/LOSS ASYMMETRY (Pure Loss Tail)
     def test_known_loss_skew(self):
         # 100 returns: 50 small gains, 49 small losses, 1 huge loss.
         # The top 1% of extreme events is just that one -50% crash.
@@ -146,6 +137,7 @@ class TestGainLossAsymmetry(unittest.TestCase):
         self.assertIn('body_loss_pct', result)
         self.assertIn('alternative', result)
 
+    # TEST 7: GAIN/LOSS ASYMMETRY (Pure Gain Tail)
     def test_known_gain_skew(self):
         # Same setup but the extreme event is a +50% gain instead of a loss.
         # The tail is 100% gains, 0% losses.
@@ -164,6 +156,7 @@ class TestGainLossAsymmetry(unittest.TestCase):
         self.assertIsNone(result['avg_loss'])
         self.assertIn('body_loss_pct', result)
 
+    # TEST 8: GAIN/LOSS ASYMMETRY (Mixed Tail, Not Significant)
     def test_mixed_extremes_not_significant(self):
         # Body: 48 gains + 48 losses = exactly 50% loss rate.
         # Tail: 3 losses + 1 gain = 75% loss rate.
@@ -185,6 +178,7 @@ class TestGainLossAsymmetry(unittest.TestCase):
         self.assertAlmostEqual(result['median_gain'], 0.55, delta=0.001)
         self.assertGreater(result['pvalue'], 0.05)
 
+    # TEST 9: GAIN/LOSS ASYMMETRY (Strong Loss Skew, Significant)
     def test_strong_loss_asymmetry_significant(self):
         # Body: 490 gains + 490 losses = 50% loss rate (balanced).
         # Tail: 18 losses + 2 gains = 90% loss rate (very loss-heavy).
@@ -202,6 +196,7 @@ class TestGainLossAsymmetry(unittest.TestCase):
         self.assertEqual(result['alternative'], 'larger')
         self.assertGreater(result['z_stat'], 0)
 
+    # TEST 10: GAIN/LOSS ASYMMETRY (Bullish Body, Bearish Tail)
     def test_bullish_body_bearish_tail(self):
         # Body: 700 gains + 300 losses = 30% loss rate (overall bullish market).
         # Tail: 16 losses + 4 gains = 80% loss rate (crashes dominate the extremes).
@@ -224,6 +219,7 @@ class TestGainLossAsymmetry(unittest.TestCase):
                         "Tail 80% losses vs body 30% losses must be flagged as significant.")
         self.assertEqual(result['alternative'], 'larger')
 
+    # TEST 11: GAIN/LOSS ASYMMETRY (Robustness)
     def test_robustness_nan_inf(self):
         # Feed the function bad data: NaN (missing) and Inf (infinity).
         # It should clean the data and not explode.
@@ -241,6 +237,7 @@ class TestGainLossAsymmetry(unittest.TestCase):
 
 class TestDataManagerCacheBug(unittest.TestCase):
 
+    # TEST 12: DATA MANAGER CACHE BUG (Timestamp vs Date Type Mismatch)
     def test_days_received_matches_missing_days_type(self):
         # Bug: pandas gives us Timestamp objects, but groupby gives us datetime.date objects.
         # Timestamp(2024-01-02) == date(2024-01-02) is False in Python — different types!
@@ -261,6 +258,7 @@ class TestDataManagerCacheBug(unittest.TestCase):
 
 class TestDataManagerErrorReporting(unittest.TestCase):
 
+    # TEST 13: DATA MANAGER ERROR REPORTING (Ticker Name in Error Message)
     def test_empty_return_includes_ticker_in_report(self):
         # When the data fetch fails, the error message must say WHICH ticker failed.
         # "No data available" is useless. "No data available for FAKEXYZ" is helpful.
@@ -285,6 +283,7 @@ class TestDataManagerErrorReporting(unittest.TestCase):
 
 class TestAggregationalGaussianity(unittest.TestCase):
 
+    # TEST 14: AGGREGATIONAL GAUSSIANITY (Kurtosis Decreases with Scale)
     def test_kurtosis_decreases_with_aggregation(self):
         # t-distribution with df=5 has fat tails (excess kurtosis = 6).
         # When you average many t-distributed returns together (Central Limit Theorem),
@@ -305,6 +304,7 @@ class TestAggregationalGaussianity(unittest.TestCase):
         self.assertGreater(kurt[1], 1.0,
                            "t(5) daily returns should have noticeable fat tails (kurtosis > 1).")
 
+    # TEST 15: AGGREGATIONAL GAUSSIANITY (Gaussian Stays Near-Zero Kurtosis)
     def test_gaussian_stays_near_zero_kurtosis(self):
         # Normal/Gaussian data already has zero excess kurtosis by definition.
         # Averaging Gaussians gives more Gaussians, so kurtosis should stay near 0 at all scales.
@@ -320,6 +320,7 @@ class TestAggregationalGaussianity(unittest.TestCase):
             self.assertAlmostEqual(k, 0.0, delta=1.0,
                                    msg=f"Gaussian data should stay near kurtosis=0 at scale {scale}.")
 
+    # TEST 16: AGGREGATIONAL GAUSSIANITY (Return Structure)
     def test_return_structure(self):
         # Just check that the output dictionary has the right keys and right types.
         np.random.seed(42)
@@ -336,6 +337,7 @@ class TestAggregationalGaussianity(unittest.TestCase):
         self.assertIn(1, result['kurtosis_by_scale'])
         self.assertIn(10, result['kurtosis_by_scale'])
 
+    # TEST 17: AGGREGATIONAL GAUSSIANITY (Robustness)
     def test_robustness_nan_inf(self):
         # NaN and Inf in the input — the function must survive without crashing.
         dirty_returns = pd.Series([0.01, -0.01, np.nan, np.inf, -np.inf, 0.02, -0.03] * 500)
@@ -348,6 +350,7 @@ class TestAggregationalGaussianity(unittest.TestCase):
         except Exception as e:
             self.fail(f"AggregationalGaussianity crashed on bad data: {e}")
 
+    # TEST 18: AGGREGATIONAL GAUSSIANITY (Convergence Confirmed)
     def test_convergence_detected_for_heavy_tails(self):
         # convergence_confirmed=True means kurtosis is falling as scale increases.
         # For fat-tailed data, this should always be True (CLT is doing its job).
@@ -363,6 +366,7 @@ class TestAggregationalGaussianity(unittest.TestCase):
 
 class TestIntermittency(unittest.TestCase):
 
+    # TEST 19: INTERMITTENCY (Clustered Extremes, High Fano Factor)
     def test_clustered_extremes_high_fano(self):
         # Fano factor = variance of counts / mean of counts.
         # If extremes are clustered (all in one block, none elsewhere),
@@ -382,6 +386,7 @@ class TestIntermittency(unittest.TestCase):
         self.assertGreater(result['fano_factor'], 1.0,
                            "Bunched-up extremes must give Fano > 1.")
 
+    # TEST 20: INTERMITTENCY (Uniform Extremes, Fano Near One)
     def test_uniform_extremes_fano_near_one(self):
         # Exactly 1 extreme per block → counts are [1, 1, 1, ...] → variance = 0 → Fano ≈ 0.
         # So Fano should definitely be ≤ 1.5 (not bursty at all).
@@ -402,6 +407,7 @@ class TestIntermittency(unittest.TestCase):
         self.assertLessEqual(result['fano_factor'], 1.5,
                              "One extreme per block should NOT produce a high Fano factor.")
 
+    # TEST 21: INTERMITTENCY (Return Structure)
     def test_return_structure(self):
         # Just check that all the expected keys come back with the right data types.
         np.random.seed(42)
@@ -425,6 +431,7 @@ class TestIntermittency(unittest.TestCase):
         self.assertIsInstance(result['intermittent'], bool)
         self.assertFalse(np.isnan(result['fano_factor']))
 
+    # TEST 22: INTERMITTENCY (Regime-Switching Data Is Intermittent)
     def test_regime_switching_data_is_intermittent(self):
         # 2500 high-volatility returns followed by 2500 calm returns.
         # Extreme events pile up in the first half, nothing in the second half.
@@ -442,6 +449,7 @@ class TestIntermittency(unittest.TestCase):
                         "Volatile-then-calm data should be flagged as intermittent.")
         self.assertGreater(result['fano_factor'], 1.0)
 
+    # TEST 23: INTERMITTENCY (Gaussian Data Not Intermittent)
     def test_gaussian_data_not_intermittent(self):
         # Pure Gaussian (random) data has no pattern — extreme events are spread out randomly.
         # They follow a Poisson process where Fano ≈ 1. Should not be strongly bursty.
@@ -455,6 +463,7 @@ class TestIntermittency(unittest.TestCase):
         self.assertLess(result['fano_factor'], 3.0,
                         "Random Gaussian data should not look bursty (Fano < 3).")
 
+    # TEST 24: INTERMITTENCY (Robustness)
     def test_robustness_nan_inf(self):
         # Mix in NaN and Inf with real data. The function should survive.
         np.random.seed(42)
@@ -471,6 +480,7 @@ class TestIntermittency(unittest.TestCase):
         except Exception as e:
             self.fail(f"Intermittency crashed on bad data: {e}")
 
+    # TEST 25: INTERMITTENCY (Insufficient Data Returns None)
     def test_insufficient_data_returns_none(self):
         # Only 3 data points but block_size=100: not enough to form a single block.
         # The function should return None gracefully instead of crashing.
@@ -484,6 +494,7 @@ class TestIntermittency(unittest.TestCase):
 
 class TestSlowDecay(unittest.TestCase):
 
+    # TEST 26: SLOW DECAY (Return Structure)
     def test_return_structure(self):
         # GARCH(1,1): today's volatility depends on yesterday's — it's "sticky".
         # We check the output dictionary has all the keys we expect.
@@ -513,6 +524,7 @@ class TestSlowDecay(unittest.TestCase):
         self.assertEqual(len(result['lags']), 50)
         self.assertEqual(len(result['acf_alpha1']), 50)
 
+    # TEST 27: SLOW DECAY (Both Alphas Computed)
     def test_both_alphas_computed(self):
         # The slow decay test is run twice: once on |returns| (alpha=1) and once on returns^2 (alpha=2).
         # Both beta values (the decay rate exponent) must be present and not None.
@@ -536,6 +548,7 @@ class TestSlowDecay(unittest.TestCase):
         self.assertIsNotNone(result['A_alpha1'])
         self.assertIsNotNone(result['A_alpha2'])
 
+    # TEST 28: SLOW DECAY (ACF Positive at Lag 1 for GARCH)
     def test_acf_positive_at_lag1_for_garch(self):
         # For GARCH data, today's absolute return is correlated with yesterday's.
         # High volatility tends to stick around. So ACF at lag 1 must be > 0.
@@ -557,6 +570,7 @@ class TestSlowDecay(unittest.TestCase):
         self.assertGreater(result['acf_alpha1'][0], 0.0,
                            "GARCH |returns| must have positive autocorrelation at lag 1.")
 
+    # TEST 29: SLOW DECAY (Beta Exponent Is Positive)
     def test_beta_positive_for_garch(self):
         # Beta is the power-law exponent: ACF(lag) ~ A * lag^(-beta).
         # If ACF starts positive and decays, beta must be positive.
@@ -580,6 +594,7 @@ class TestSlowDecay(unittest.TestCase):
         self.assertGreater(result['beta_alpha2'], 0,
                            "Beta for squared returns must also be positive.")
 
+    # TEST 30: SLOW DECAY (Robustness)
     def test_robustness_nan_inf(self):
         # Feed in a mix of good data and garbage. Should not crash.
         np.random.seed(42)
@@ -596,6 +611,7 @@ class TestSlowDecay(unittest.TestCase):
         except Exception as e:
             self.fail(f"SlowDecay crashed on bad data: {e}")
 
+    # TEST 31: SLOW DECAY (Insufficient Data Returns None)
     def test_insufficient_data_returns_none(self):
         # Only 5 data points but max_lag=50: impossible to compute a 50-lag ACF.
         # Should return None gracefully.
@@ -609,6 +625,7 @@ class TestSlowDecay(unittest.TestCase):
 
 class TestLeverageEffect(unittest.TestCase):
 
+    # TEST 32: LEVERAGE EFFECT (Return Structure)
     def test_return_structure(self):
         # Check that the output dict has all expected keys with correct types.
         np.random.seed(42)
@@ -627,6 +644,7 @@ class TestLeverageEffect(unittest.TestCase):
         self.assertIsInstance(result['min_L'], float)
         self.assertIsInstance(result['min_lag'], int)
 
+    # TEST 33: LEVERAGE EFFECT (Lags Span Negative to Positive)
     def test_lags_span_negative_to_positive(self):
         # The leverage function L(tau) is computed for both positive and negative lags.
         # With max_lag=30, we need lags from -30 to +30, which is 61 values total.
@@ -642,6 +660,7 @@ class TestLeverageEffect(unittest.TestCase):
         self.assertEqual(max(lags), 30)
         self.assertEqual(len(lags), 61)
 
+    # TEST 34: LEVERAGE EFFECT (Detected for Crash Data)
     def test_leverage_detected_for_asymmetric_data(self):
         # Constructed crash data: after a -1.0 return, next 4 returns are very volatile (std=0.5).
         # After a +1.0 return, next 4 returns are totally calm (std=0.001).
@@ -668,6 +687,7 @@ class TestLeverageEffect(unittest.TestCase):
         self.assertLess(float(np.nanmin(pos_L)), -0.1,
                         "The leverage effect must be large (min L < -0.1) for this constructed data.")
 
+    # TEST 35: LEVERAGE EFFECT (IID Data, No Strong Leverage)
     def test_iid_data_no_strong_leverage(self):
         # Random (iid) Gaussian data: no relationship between past returns and future variance.
         # L(tau) should stay close to zero for all tau > 0 (nothing is above -0.1).
@@ -684,6 +704,7 @@ class TestLeverageEffect(unittest.TestCase):
         self.assertGreater(float(np.nanmin(pos_L)), -0.1,
                            "Random data should not show a strong leverage effect (min L > -0.1).")
 
+    # TEST 36: LEVERAGE EFFECT (Robustness)
     def test_robustness_nan_inf(self):
         # Feed in garbage data. Should not crash.
         np.random.seed(42)
@@ -700,6 +721,7 @@ class TestLeverageEffect(unittest.TestCase):
         except Exception as e:
             self.fail(f"LeverageEffect crashed on bad data: {e}")
 
+    # TEST 37: LEVERAGE EFFECT (Insufficient Data Returns None)
     def test_insufficient_data_returns_none(self):
         # Only 3 data points with max_lag=50: not enough. Should return None.
         data = pd.Series([0.01, -0.01, 0.02])
@@ -712,6 +734,7 @@ class TestLeverageEffect(unittest.TestCase):
 
 class TestVolVolCorr(unittest.TestCase):
 
+    # TEST 38: VOL-VOL CORRELATION (Return Structure)
     def test_return_structure(self):
         # Check all expected keys exist with the right types.
         # rho = correlation coefficient (between -1 and 1).
@@ -743,6 +766,7 @@ class TestVolVolCorr(unittest.TestCase):
         self.assertIsInstance(result['significant_sq'], bool)
         self.assertIsInstance(result['corr_confirmed'], bool)
 
+    # TEST 39: VOL-VOL CORRELATION (Positive Correlation Detected)
     def test_positive_correlation_detected(self):
         # We manually make volume = |return| * 10 million + small noise.
         # So when returns are big, volume is big. Correlation should be very strong (rho > 0.5).
@@ -765,6 +789,7 @@ class TestVolVolCorr(unittest.TestCase):
                         "significant_abs must be True when rho > 0 and p < 0.05.")
         self.assertTrue(result['corr_confirmed'])
 
+    # TEST 40: VOL-VOL CORRELATION (T-Statistic Formula)
     def test_t_statistic_formula(self):
         # t = rho * sqrt(n - 2) / sqrt(1 - rho^2)
         # This converts a correlation coefficient into a t-score for a significance test.
@@ -789,6 +814,7 @@ class TestVolVolCorr(unittest.TestCase):
         self.assertAlmostEqual(result['t_abs'], expected_t_abs, places=4,
                                msg="t_abs must match rho * sqrt(n-2) / sqrt(1 - rho^2).")
 
+    # TEST 41: VOL-VOL CORRELATION (IID Data, Not Significant)
     def test_iid_data_not_significant(self):
         # Volume and returns are generated completely independently — no real relationship.
         # The p-value should be > 0.05, meaning we can't reject the "no correlation" hypothesis.
@@ -806,6 +832,7 @@ class TestVolVolCorr(unittest.TestCase):
         self.assertFalse(result['corr_confirmed'],
                          "corr_confirmed must be False when volume and returns are independent.")
 
+    # TEST 42: VOL-VOL CORRELATION (Robustness)
     def test_robustness_nan_inf(self):
         # Feed garbage data in both series. Must not crash.
         np.random.seed(42)
@@ -825,6 +852,7 @@ class TestVolVolCorr(unittest.TestCase):
         except Exception as e:
             self.fail(f"VolVolCorr crashed on bad data: {e}")
 
+    # TEST 43: VOL-VOL CORRELATION (Insufficient Data Returns None)
     def test_insufficient_data_returns_none(self):
         # Only 3 data points — not enough for a meaningful correlation. Should return None.
         data_r = pd.Series([0.01, -0.01, 0.02])
@@ -838,6 +866,7 @@ class TestVolVolCorr(unittest.TestCase):
 
 class TestAsymmetryTimescales(unittest.TestCase):
 
+    # TEST 44: TIMESCALE ASYMMETRY (Return Structure)
     def test_return_structure(self):
         # A(tau) = correlation between coarse (long-window) volatility and fine (short-window) future returns.
         # D(tau) = A(tau) - A(-tau): if D < 0, big slow moves predict small fast moves more than vice versa.
@@ -863,6 +892,7 @@ class TestAsymmetryTimescales(unittest.TestCase):
         self.assertEqual(len(result['A_neg']), 5)
         self.assertEqual(len(result['D_values']), 5)
 
+    # TEST 45: TIMESCALE ASYMMETRY (D = A_pos - A_neg Formula Check)
     def test_D_equals_Apos_minus_Aneg(self):
         # D(tau) is defined as A(tau) - A(-tau). Check this math holds exactly.
         np.random.seed(42)
@@ -886,6 +916,7 @@ class TestAsymmetryTimescales(unittest.TestCase):
                     msg=f"D[{i}] = {d:.6f} but A_pos[{i}] - A_neg[{i}] = {a_pos - a_neg:.6f}"
                 )
 
+    # TEST 46: TIMESCALE ASYMMETRY (A Values Are Valid Correlations)
     def test_A_values_are_valid_correlations(self):
         # Correlation must always be between -1 and 1. Any value outside that is a bug.
         np.random.seed(42)
@@ -910,6 +941,7 @@ class TestAsymmetryTimescales(unittest.TestCase):
                 self.assertGreaterEqual(a_neg, -1.0 - 1e-9, f"A_neg[{i}]={a_neg:.4f} is below -1.")
                 self.assertLessEqual(a_neg, 1.0 + 1e-9, f"A_neg[{i}]={a_neg:.4f} is above 1.")
 
+    # TEST 47: TIMESCALE ASYMMETRY (IID Data, D Near Zero)
     def test_iid_D_near_zero(self):
         # Random (iid) data has no time-scale structure, so D(tau) should be close to zero.
         # |D_mean| < 0.15 is our threshold for "basically zero".
@@ -924,6 +956,7 @@ class TestAsymmetryTimescales(unittest.TestCase):
         self.assertLess(abs(d_mean), 0.15,
                         f"Random data should have |D_mean| < 0.15, got {d_mean:.4f}.")
 
+    # TEST 48: TIMESCALE ASYMMETRY (Robustness)
     def test_robustness_nan_inf(self):
         # Garbage data in the input. Should not crash.
         np.random.seed(42)
@@ -940,6 +973,7 @@ class TestAsymmetryTimescales(unittest.TestCase):
         except Exception as e:
             self.fail(f"AsymmetryTimescales crashed on bad data: {e}")
 
+    # TEST 49: TIMESCALE ASYMMETRY (Insufficient Data Returns None)
     def test_insufficient_data_returns_none(self):
         # 5 data points with dT=5 and max_tau=10: nowhere near enough. Should return None.
         short = pd.Series([0.01, -0.01, 0.02, 0.00, -0.02])
@@ -952,6 +986,7 @@ class TestAsymmetryTimescales(unittest.TestCase):
 
 class TestConditionalTails(unittest.TestCase):
 
+    # TEST 50: CONDITIONAL TAILS (Return Structure)
     def test_return_structure(self):
         # GARCH(1,1) with t(5) innovations: the model removes volatility clustering,
         # but the leftover residuals (epsilon) should still look fat-tailed.
@@ -979,6 +1014,7 @@ class TestConditionalTails(unittest.TestCase):
         self.assertIsInstance(result['non_gaussian'], bool)
         self.assertIsInstance(result['tail_index'], float)
 
+    # TEST 51: CONDITIONAL TAILS (Residuals Have Excess Kurtosis)
     def test_garch_t_residuals_have_excess_kurtosis(self):
         # t(5) innovations have excess kurtosis = 6/(5-4) = 6.
         # After stripping out GARCH volatility, the residuals should still show excess kurtosis > 0.
@@ -1001,6 +1037,7 @@ class TestConditionalTails(unittest.TestCase):
                            f"Residuals from t(5) innovations must still have excess kurtosis > 0. "
                            f"Got {result['excess_kurtosis']:.4f}.")
 
+    # TEST 52: CONDITIONAL TAILS (Residuals Near Unit Standard Deviation)
     def test_residuals_approximately_unit_std(self):
         # After dividing returns by GARCH conditional volatility, the residuals epsilon = r / sigma.
         # If GARCH estimates sigma correctly, std(epsilon) should be near 1.0.
@@ -1024,6 +1061,7 @@ class TestConditionalTails(unittest.TestCase):
         self.assertGreater(std_eps, 0.7, f"Residual std should be > 0.7, got {std_eps:.4f}.")
         self.assertLess(std_eps, 1.5, f"Residual std should be < 1.5, got {std_eps:.4f}.")
 
+    # TEST 53: CONDITIONAL TAILS (Tail Index Is Finite and Positive)
     def test_tail_index_is_finite_positive(self):
         # The Hill estimator estimates the tail index (how fat the tails are).
         # For any realistic fat-tailed data it must be a positive, finite number.
@@ -1045,6 +1083,7 @@ class TestConditionalTails(unittest.TestCase):
         self.assertTrue(np.isfinite(tai), f"tail_index must be a finite number, got {tai}.")
         self.assertGreater(tai, 0.0, f"tail_index must be positive, got {tai:.4f}.")
 
+    # TEST 54: CONDITIONAL TAILS (Robustness)
     def test_robustness_nan_inf(self):
         # Garbage input. Must not crash.
         np.random.seed(42)
@@ -1060,6 +1099,7 @@ class TestConditionalTails(unittest.TestCase):
         except Exception as e:
             self.fail(f"ConditionalTails crashed on bad data: {e}")
 
+    # TEST 55: CONDITIONAL TAILS (Insufficient Data Returns None)
     def test_insufficient_data_returns_none(self):
         # Only 10 data points — way too few for GARCH fitting. Should return None.
         np.random.seed(42)

@@ -114,18 +114,79 @@ class DataManager:
         return self.audit_and_clean(full_df, interval)
 
     def audit_and_clean(self, df, interval):
-        # ... (keep your existing audit_and_clean code here)
-        if df.empty: return df, pd.Series(), "❌ ERROR: No data"
+        if df.empty:
+            return df, pd.Series(), "❌ ERROR: No data"
+
         c_df = df.copy()
-        returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
         issues = []
-        if interval in ['1m', '5m']:
+        warnings = []
+
+        # --- 1. NaN VALUES ---
+        # Check for missing OHLCV values and forward-fill them.
+        nan_count = c_df[['Open', 'High', 'Low', 'Close', 'Volume']].isna().sum().sum()
+        if nan_count > 0:
+            c_df = c_df.ffill()
+            issues.append(f"REPAIRED: {nan_count} NaN values (forward-filled)")
+
+        # --- 2. NEGATIVE PRICES ---
+        # A stock price below zero is physically impossible. Drop those rows entirely.
+        neg_mask = (c_df[['Open', 'High', 'Low', 'Close']] < 0).any(axis=1)
+        n_neg = neg_mask.sum()
+        if n_neg > 0:
+            c_df = c_df[~neg_mask]
+            issues.append(f"DROPPED: {n_neg} rows with negative prices")
+
+        # --- 3. ZERO CLOSE PRICE ---
+        # A close price of exactly 0 is almost always a data error. Drop those rows.
+        zero_close_mask = c_df['Close'] == 0
+        n_zero_close = zero_close_mask.sum()
+        if n_zero_close > 0:
+            c_df = c_df[~zero_close_mask]
+            issues.append(f"DROPPED: {n_zero_close} rows with zero close price")
+
+        # --- 4. OHLC CONSISTENCY ---
+        # High must be >= Low, and Close must sit inside [Low, High].
+        # Violating these means the bar is corrupted.
+        ohlc_bad = (
+            (c_df['High'] < c_df['Low']) |
+            (c_df['Close'] > c_df['High']) |
+            (c_df['Close'] < c_df['Low'])
+        )
+        n_ohlc_bad = ohlc_bad.sum()
+        if n_ohlc_bad > 0:
+            c_df = c_df[~ohlc_bad]
+            issues.append(f"DROPPED: {n_ohlc_bad} rows with broken OHLC (High < Low or Close out of range)")
+
+        # --- 5. ZERO VOLUME ---
+        # Zero volume on an active trading bar is suspicious — could be a stale/phantom bar.
+        # We warn but keep the data since it may be valid (halted trading, etc.).
+        zero_vol_mask = c_df['Volume'] == 0
+        n_zero_vol = zero_vol_mask.sum()
+        if n_zero_vol > 0:
+            warnings.append(f"WARNING: {n_zero_vol} bars with zero volume (kept — verify manually)")
+
+        # --- 6. COMPUTE LOG RETURNS ---
+        returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
+
+        # --- 7. V-SPIKE DETECTION (intraday only) ---
+        # A V-spike is a bar that shoots way up (or down) then immediately reverses.
+        # Pattern: |r_t| >> 5σ AND r_t + r_{t+1} ≈ 0 (meaning it reversed next bar).
+        # Only relevant for high-frequency data — daily bars don't get V-spikes.
+        if interval in ['1m', '5m'] and len(returns) > 10:
             std = returns.std()
-            spike_idx = np.where((np.abs(returns) > 5.0 * std) & (np.abs(np.roll(returns, -1) + returns) < std))[0]
-            if len(spike_idx) > 0:
-                c_df.iloc[spike_idx] = np.nan
-                c_df = c_df.ffill()
-                returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
-                issues.append(f"REPAIRED: {len(spike_idx)} V-Spikes")
-        report = "✅ DATA CLEAN" if not issues else " | ".join(issues)
+            if std > 0:
+                r_arr = returns.values
+                spike_idx = np.where(
+                    (np.abs(r_arr) > 5.0 * std) &
+                    (np.abs(np.roll(r_arr, -1) + r_arr) < std)
+                )[0]
+                if len(spike_idx) > 0:
+                    c_df.iloc[spike_idx] = np.nan
+                    c_df = c_df.ffill()
+                    returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
+                    issues.append(f"REPAIRED: {len(spike_idx)} V-Spikes")
+
+        # --- BUILD REPORT ---
+        parts = issues + warnings
+        report = "✅ DATA CLEAN" if not parts else " | ".join(parts)
         return c_df, returns, report
