@@ -15,7 +15,7 @@ cd financial-stylized-facts
 ## 3. Install Dependencies
 Install the required quantitative and financial libraries via pip:
 ```
-pip install alpaca-py pandas numpy scipy statsmodels matplotlib python-dotenv
+pip install -r requirements.txt
 ```
 
 ## 4. Configure Environment
@@ -43,24 +43,3 @@ Validate the statistical engines against known theoretical properties (such as F
 ```
 python unit_test.py
 ```
-
-## Strategy Design Assumptions
-
-This regime-switching strategy requires risk assets with secular uptrends and consistent risk premia, such as SPY, QQQ, or UPRO, exhibiting realized volatility in the 15-50% range for optimal dynamic leverage scaling. 
-
-Safe assets must demonstrate true safe haven properties with historical maximum drawdowns under 20%, low or negative correlation to the risk asset during equity market crashes, and reliable value preservation. Validated safe assets include GLD (gold), BIL (T-bills), and UUP (USD).
-
-The strategy was tested across the complete equity supercycle from 2015-2026, encompassing three major crashes and four bull markets. Sideways sectors like XLE and failing safe assets like TMF during its 2022 massacre correctly underperform, confirming no universal alpha—only selective risk premia capture.
-
-**Production Results:**
-- SPY/GLD monthly rebalance: 0.90 Sharpe, -22% maximum drawdown vs SPY's -35%
-- UPRO/GLD scaled version: 1.09 Calmar, -33% maximum drawdown vs UPRO's -78%
-
-For production deployment, SPY/GLD monthly rebalance is recommended. Monitoring prioritizes maximum drawdown edge preservation over absolute returns, with kill criteria triggered by safe asset correlation breakdown or risk premia decay.
-
-**Backtester Features:**
-- Automatic ETF split handling (TBT, UPRO confirmed)
-- 8bps round-trip fees stress-tested (4x prop shop buffer)
-- Parameter robustness across 67% of neighborhood space
-
-**Live Trading Plan:** Paper trade SPY/GLD monthly rebalance starting Week 1 post-approval.
