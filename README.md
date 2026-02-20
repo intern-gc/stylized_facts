@@ -15,7 +15,7 @@ cd financial-stylized-facts
 ## 3. Install Dependencies
 Install the required quantitative and financial libraries via pip:
 ```
-pip install alpaca-py pandas numpy scipy statsmodels matplotlib python-dotenv
+pip install -r requirements.txt
 ```
 
 ## 4. Configure Environment
