@@ -3,7 +3,7 @@
 # Installation & Setup
 
 ## 1. Prerequisites
-* **Python 3.9+**
+* **Python 3.12**
 * An active **Alpaca Markets API** account (for historical data access).
 
 ## 2. Clone and Prepare
@@ -28,7 +28,7 @@ ALPACA_SECRET_KEY=your_secret_key_here
 # Usage
 
 ## Running the Analysis
-The central entry point is main.py. Execute it to run the full stylized facts report, including Autocorrelation, Heavy Tails (EVT), and Volatility Clustering:
+The central entry point is main.py. 
 ```
 python main.py
 ```
