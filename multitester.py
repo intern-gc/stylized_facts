@@ -33,10 +33,14 @@ from facts_test.conditional import ConditionalTails
 
 # ── USER CONFIGURATION ─────────────────────────────────────────────────────────
 TICKERS = [
-    "MSFT", "GOOGL", "AMZN",       # The "Digital Utilities" (Tech Blue Chips)
-    "JPM", "BAC", "GS",            # The Banking Giants (Financial Stability)
-    "WMT", "JNJ",                  # Defensive Staples (Retail & Healthcare)
-    "DIA", "XLF"                   # Major ETFs (Dow Jones & Financial Sector)
+    "NVDA", "META", "AMD",         # Tech, Social & Semiconductors
+    "HD", "SBUX", "MCD",           # Consumer Discretionary & Dining
+    "UNH", "LLY", "PFE",           # Healthcare & Pharmaceuticals
+    "XOM", "CVX",                  # Energy & Oil Heavyweights
+    "V", "MA",                     # Global Payment Processors
+    "CAT", "BA",                   # Industrials & Aerospace
+    "DIS", "NFLX",                 # Media & Entertainment
+    "KO", "PG", "VNQ"              # Consumer Staples & Real Estate ETF
 ]
 INTERVALS   = ["1m", "1h", "1d"]
 START_DATE  = "2015-01-01"
