@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def run_analysis():
     # --- CONFIGURATION ---
-    ticker = "NFLX"
+    ticker = "GLD"
     interval = "1d"  # Try "1m", "5m", "1h", or "1d"
 
     start_date = "2015-01-01"
@@ -34,7 +34,7 @@ def run_analysis():
 
     # FACT 1: Volatility Clustering
     vc_tester = VolatilityClustering(returns, ticker)
-    c2_values, vc_sig_lags = vc_tester.compute_c2(max_lag=40)
+    c1_values, vc_sig_lags = vc_tester.compute_c1(max_lag=40)
 
     # FACT 2: Slow Decay of Autocorrelation
     sd_tester = SlowDecay(returns, ticker)

@@ -54,10 +54,36 @@ class VolVolCorr:
             return rho, float('nan'), float('nan')
 
         t_stat = rho * np.sqrt(n - 2) / np.sqrt(1.0 - rho ** 2)
-        pval = float(stats.t.sf(t_stat, df=n - 2))
+        pval = float(stats.t.sf(
+            t_stat,   # the t-statistic to evaluate
+            df=n - 2, # degrees of freedom: n observations minus 2 estimated parameters (mean of x, mean of y)
+            # sf = survival function = 1 - CDF = P(T > t_stat): gives the one-sided right-tail p-value.
+            # We use one-sided because H1 is rho > 0 (positive correlation only).
+        ))
         return rho, float(t_stat), pval
 
-    def compute_correlation(self, plot=True):
+    def _compute_null_rho(self, n_shuffles=1000):
+        """
+        Build null distributions for rho_abs and rho_sq by shuffling returns
+        n_shuffles times (volume is kept fixed, breaking the pairing).
+
+        Returns (threshold_abs, threshold_sq): 99th percentile of |rho_null|
+        for each proxy — the most extreme white-noise correlation expected.
+        """
+        null_abs = np.empty(n_shuffles)
+        null_sq = np.empty(n_shuffles)
+        r = self.returns.copy()
+        v = self.volume
+        for i in range(n_shuffles):
+            r_shuf = np.random.permutation(r)
+            null_abs[i] = np.corrcoef(v, np.abs(r_shuf))[0, 1]
+            null_sq[i] = np.corrcoef(v, r_shuf ** 2)[0, 1]
+        return (
+            float(np.percentile(np.abs(null_abs), 99)),
+            float(np.percentile(np.abs(null_sq), 99)),
+        )
+
+    def compute_correlation(self, plot=True, n_shuffles=1000):
         """
         Compute volume-volatility correlations for both |r| and r^2.
 
@@ -79,8 +105,9 @@ class VolVolCorr:
         rho_abs, t_abs, pval_abs = self._pearson_t_test(v, abs_r)
         rho_sq, t_sq, pval_sq = self._pearson_t_test(v, sq_r)
 
-        sig_abs = bool(np.isfinite(rho_abs) and rho_abs > 0 and pval_abs < 0.05)
-        sig_sq = bool(np.isfinite(rho_sq) and rho_sq > 0 and pval_sq < 0.05)
+        null_thr_abs, null_thr_sq = self._compute_null_rho(n_shuffles)
+        sig_abs = bool(np.isfinite(rho_abs) and rho_abs > null_thr_abs)
+        sig_sq = bool(np.isfinite(rho_sq) and rho_sq > null_thr_sq)
         corr_confirmed = sig_abs or sig_sq
 
         if plot:
@@ -113,10 +140,10 @@ class VolVolCorr:
                 pass
 
         print(f"--- Volume-Volatility Correlation: {self.ticker} ---")
-        print(f"Sample size: {n}")
+        print(f"Sample size: {n} | Null CI: 99th pct of {n_shuffles} shuffles")
         _fmt = lambda x: f"{x:.4f}" if np.isfinite(x) else "N/A"
-        print(f"|r|  proxy: ρ={_fmt(rho_abs)}, t={_fmt(t_abs)}, p={_fmt(pval_abs)}")
-        print(f"r²   proxy: ρ={_fmt(rho_sq)},  t={_fmt(t_sq)},  p={_fmt(pval_sq)}")
+        print(f"|r|  proxy: ρ={_fmt(rho_abs)}, t={_fmt(t_abs)}, p={_fmt(pval_abs)} | null thr={null_thr_abs:.4f}")
+        print(f"r²   proxy: ρ={_fmt(rho_sq)},  t={_fmt(t_sq)},  p={_fmt(pval_sq)}  | null thr={null_thr_sq:.4f}")
         if corr_confirmed:
             print(f"✅ FACT CONFIRMED: Volume-volatility correlation is positive and significant.")
         else:
@@ -126,10 +153,12 @@ class VolVolCorr:
             'rho_abs': rho_abs,
             't_abs': t_abs,
             'pval_abs': pval_abs,
+            'null_thr_abs': null_thr_abs,
             'significant_abs': sig_abs,
             'rho_sq': rho_sq,
             't_sq': t_sq,
             'pval_sq': pval_sq,
+            'null_thr_sq': null_thr_sq,
             'significant_sq': sig_sq,
             'corr_confirmed': corr_confirmed,
         }

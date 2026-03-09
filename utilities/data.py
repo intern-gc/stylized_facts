@@ -52,8 +52,12 @@ class DataManager:
                 timeframe=self._get_alpaca_tf(interval),
                 start=datetime.combine(fetch_start, time(0, 0)),
                 end=datetime.combine(fetch_end, time(23, 59)),
-                feed="sip",
-                adjustment='split'
+                feed="sip",        # Securities Information Processor: the consolidated tape aggregating
+                                   # quotes from all US exchanges. More complete than "iex" (IEX-only)
+                                   # or "otc". Requires a funded Alpaca account.
+                adjustment='split' # adjust historical prices for stock splits so that the price
+                                   # series is continuous. Without this, a 2-for-1 split would show
+                                   # a -50% return on split day, which is not a real return.
             )
 
             try:
@@ -165,29 +169,42 @@ class DataManager:
         if n_zero_vol > 0:
             warnings.append(f"WARNING: {n_zero_vol} bars with zero volume (kept — verify manually)")
 
-        # --- 6. COMPUTE LOG RETURNS ---
-        returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
-
-        # --- 7. V-SPIKE DETECTION (intraday only) ---
+        # --- 6. V-SPIKE DETECTION (intraday only) ---
         # A V-spike is a bar that shoots way up (or down) then immediately reverses.
         # Pattern: |r_t| >> 5σ AND r_t + r_{t+1} ≈ 0 (meaning it reversed next bar).
         # Only relevant for high-frequency data — daily bars don't get V-spikes.
-        if interval in ['1m', '5m'] and len(returns) > 10:
-            std = returns.std()
+        # Uses global shift so bar_idx maps correctly to c_df.iloc positions.
+        # Overnight gaps won't be flagged as spikes because they don't immediately reverse.
+        if interval in ['1m', '5m'] and len(c_df) > 10:
+            _global_ret = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
+            std = _global_ret.std()
             if std > 0:
-                r_arr = returns.values
+                r_arr = _global_ret.values
                 spike_idx = np.where(
                     (np.abs(r_arr) > 5.0 * std) &
                     (np.abs(np.roll(r_arr, -1) + r_arr) < std)
                 )[0]
                 if len(spike_idx) > 0:
-                    # returns[k] = log(close[k+1] / close[k]), so the spike BAR
+                    # _global_ret[k] = log(close[k+1] / close[k]), so the spike BAR
                     # is at position k+1 in c_df, not k. Null that bar then ffill.
                     bar_idx = np.clip(spike_idx + 1, 0, len(c_df) - 1)
                     c_df.iloc[bar_idx] = np.nan
                     c_df = c_df.ffill()
-                    returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
                     issues.append(f"REPAIRED: {len(spike_idx)} V-Spikes")
+
+        # --- 7. COMPUTE LOG RETURNS ---
+        # Daily: close-to-close overnight return is the standard convention.
+        # Intraday: compute within each trading day only. A global shift(1) across
+        # the stitched DataFrame would include the overnight gap (last bar of day N
+        # → first bar of day N+1), injecting large spurious outliers into the series.
+        if interval == '1d':
+            returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
+        else:
+            day_rets = []
+            for _, group in c_df.groupby(c_df.index.date):
+                if len(group) > 1:
+                    day_rets.append(np.log(group['Close'] / group['Close'].shift(1)).dropna())
+            returns = pd.concat(day_rets).sort_index() if day_rets else pd.Series(dtype=float)
 
         # --- BUILD REPORT ---
         # Always show counts for every check so you can see at a glance what was found,

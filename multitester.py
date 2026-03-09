@@ -71,7 +71,7 @@ def _safe(fn, fallback='INCONCLUSIVE'):
 def fact1(returns, ticker):
     with _Quiet():
         t = VolatilityClustering(returns, ticker)
-        _, sig = t.compute_c2(max_lag=40, plot=False)
+        _, sig = t.compute_c1(max_lag=40, plot=False)
     return f'CONFIRMED ({len(sig)} lags)' if len(sig) > 0 else 'NOT DETECTED'
 
 

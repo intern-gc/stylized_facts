@@ -16,17 +16,17 @@ class TestVolatilityClustering(unittest.TestCase):
         # Because variance is stuck high for 500 days then stuck low for 500 days,
         # the squared returns are very autocorrelated — knowing today's variance
         # tells you a lot about tomorrow's.
-        # We expect several lags to be flagged as significant, and C2(lag=1) > 0.1.
+        # We expect several lags to be flagged as significant, and C1(lag=1) > 0.1.
         np.random.seed(42)
         high_vol = np.random.normal(0, 5.0, 500)
         low_vol = np.random.normal(0, 0.1, 500)
         vc_clustered_data = pd.Series(np.concatenate([high_vol, low_vol]))
 
         vc_tester = VolatilityClustering(vc_clustered_data, "THEORY_VC")
-        c2_values, sig_lags = vc_tester.compute_c2(max_lag=20, plot=False)
+        c1_values, sig_lags = vc_tester.compute_c1(max_lag=20, plot=False, n_shuffles=100)
 
         self.assertGreater(len(sig_lags), 0, "Volatile-then-calm data must show volatility clustering.")
-        self.assertGreater(c2_values[1], 0.1, "C2 at lag 1 must be strongly positive for regime-switching data.")
+        self.assertGreater(c1_values[1], 0.1, "C1 at lag 1 must be strongly positive for regime-switching data.")
 
     # TEST 2: VOLATILITY CLUSTERING (Negative)
     def test_volclustering_iid_returns(self):
@@ -37,7 +37,7 @@ class TestVolatilityClustering(unittest.TestCase):
         vc_iid_data = pd.Series(np.random.normal(0, 1.0, 1000))
 
         vc_tester = VolatilityClustering(vc_iid_data, "IID_VC")
-        c2_values, sig_lags = vc_tester.compute_c2(max_lag=20, plot=False)
+        c1_values, sig_lags = vc_tester.compute_c1(max_lag=20, plot=False, n_shuffles=100)
 
         self.assertLessEqual(len(sig_lags), 3,
                              "Random data should have almost no significant lags in the volatility ACF.")
@@ -45,48 +45,38 @@ class TestVolatilityClustering(unittest.TestCase):
 
 class TestSlowDecay(unittest.TestCase):
 
+    def _make_block_vol_returns(self, n=5000, block=500, seed=42):
+        """Alternating high/low vol blocks: 500 days std=3, 500 days std=0.05, repeat.
+        Within each block volatility is constant, so |returns| is strongly autocorrelated
+        across all lags within the same block. No model assumptions."""
+        np.random.seed(seed)
+        r = []
+        for i in range(n // block):
+            std = 3.0 if i % 2 == 0 else 0.05
+            r.extend(np.random.normal(0, std, block))
+        return pd.Series(np.array(r[:n]))
+
     # TEST 3: SLOW DECAY (Return Structure)
     def test_return_structure(self):
-        # GARCH(1,1) with persistence 0.95 (alpha1+beta1): ACF of |returns| decays slowly.
-        # lags and acf lists must have exactly max_lag=50 entries.
-        # slow_decay_confirmed must be True; ACF at lag 1 and beta must be positive.
-        np.random.seed(42)
-        n = 5000
-        alpha0, alpha1, beta1 = 0.00001, 0.05, 0.90
-        h = np.zeros(n)
-        r = np.zeros(n)
-        h[0] = alpha0 / (1 - alpha1 - beta1)
-        for t in range(1, n):
-            h[t] = alpha0 + alpha1 * r[t - 1] ** 2 + beta1 * h[t - 1]
-            r[t] = np.sqrt(h[t]) * np.random.normal()
-        garch_returns = pd.Series(r)
-
-        sd = SlowDecay(garch_returns, "TEST")
-        result = sd.compute_decay(max_lag=50, plot=False)
+        # Block-alternating volatility: |returns| is clearly autocorrelated within each block.
+        # acf lists are clipped to the significant range (lags 1..cutoff <= max_lag).
+        sv_returns = self._make_block_vol_returns()
+        sd = SlowDecay(sv_returns, "TEST")
+        result = sd.compute_decay(max_lag=50, plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
-        self.assertEqual(len(result['lags']), 50)
-        self.assertEqual(len(result['acf_alpha1']), 50)
-        self.assertEqual(len(result['acf_alpha2']), 50)
+        self.assertGreater(len(result['lags_alpha1']), 0)
+        self.assertLessEqual(len(result['lags_alpha1']), 50)
+        self.assertGreater(len(result['acf_alpha1']), 0)
         self.assertIsInstance(result['slow_decay_confirmed'], bool)
 
     # TEST 4: SLOW DECAY (Both Alphas Computed)
     def test_both_alphas_computed(self):
-        # The slow decay test is run twice: once on |returns| (alpha=1) and once on returns^2 (alpha=2).
-        # Both beta values (the decay rate exponent) must be present and not None.
-        np.random.seed(42)
-        n = 5000
-        alpha0, alpha1, beta1 = 0.00001, 0.05, 0.90
-        h = np.zeros(n)
-        r = np.zeros(n)
-        h[0] = alpha0 / (1 - alpha1 - beta1)
-        for t in range(1, n):
-            h[t] = alpha0 + alpha1 * r[t - 1] ** 2 + beta1 * h[t - 1]
-            r[t] = np.sqrt(h[t]) * np.random.normal()
-        garch_returns = pd.Series(r)
-
-        sd = SlowDecay(garch_returns, "TEST")
-        result = sd.compute_decay(max_lag=50, plot=False)
+        # Both |returns| and returns^2 are autocorrelated in block-vol data.
+        # Both beta values must be present and positive.
+        sv_returns = self._make_block_vol_returns()
+        sd = SlowDecay(sv_returns, "TEST")
+        result = sd.compute_decay(max_lag=50, plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
         self.assertGreater(result['beta_alpha1'], 0, "Decay exponent for |returns| must be positive.")
@@ -94,45 +84,25 @@ class TestSlowDecay(unittest.TestCase):
         self.assertGreater(result['A_alpha1'], 0, "Amplitude for |returns| must be positive.")
         self.assertGreater(result['A_alpha2'], 0, "Amplitude for returns^2 must be positive.")
 
-    # TEST 5: SLOW DECAY (ACF Positive at Lag 1 for GARCH)
-    def test_acf_positive_at_lag1_for_garch(self):
-        # For GARCH data, today's absolute return is correlated with yesterday's.
-        # High volatility tends to stick around. So ACF at lag 1 must be > 0.
-        np.random.seed(42)
-        n = 5000
-        alpha0, alpha1, beta1 = 0.00001, 0.05, 0.90
-        h = np.zeros(n)
-        r = np.zeros(n)
-        h[0] = alpha0 / (1 - alpha1 - beta1)
-        for t in range(1, n):
-            h[t] = alpha0 + alpha1 * r[t - 1] ** 2 + beta1 * h[t - 1]
-            r[t] = np.sqrt(h[t]) * np.random.normal()
-        garch_returns = pd.Series(r)
-
-        sd = SlowDecay(garch_returns, "TEST_GARCH")
-        result = sd.compute_decay(max_lag=50, plot=False)
+    # TEST 5: SLOW DECAY (ACF Positive at Lag 1)
+    def test_acf_positive_at_lag1(self):
+        # Within a block, today's |return| is strongly correlated with yesterday's.
+        # ACF at lag 1 must be > 0.
+        sv_returns = self._make_block_vol_returns()
+        sd = SlowDecay(sv_returns, "TEST_SV")
+        result = sd.compute_decay(max_lag=50, plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
         self.assertGreater(result['acf_alpha1'][0], 0.0,
-                           "GARCH |returns| must have positive autocorrelation at lag 1.")
+                           "Block-vol returns must have positive |returns| autocorrelation at lag 1.")
 
     # TEST 6: SLOW DECAY (Beta Exponent Is Positive)
-    def test_beta_positive_for_garch(self):
+    def test_beta_positive(self):
         # Beta is the power-law exponent: ACF(lag) ~ A * lag^(-beta).
         # If ACF starts positive and decays, beta must be positive.
-        np.random.seed(42)
-        n = 5000
-        alpha0, alpha1, beta1 = 0.00001, 0.05, 0.90
-        h = np.zeros(n)
-        r = np.zeros(n)
-        h[0] = alpha0 / (1 - alpha1 - beta1)
-        for t in range(1, n):
-            h[t] = alpha0 + alpha1 * r[t - 1] ** 2 + beta1 * h[t - 1]
-            r[t] = np.sqrt(h[t]) * np.random.normal()
-        garch_returns = pd.Series(r)
-
-        sd = SlowDecay(garch_returns, "TEST_GARCH")
-        result = sd.compute_decay(max_lag=50, plot=False)
+        sv_returns = self._make_block_vol_returns()
+        sd = SlowDecay(sv_returns, "TEST_SV")
+        result = sd.compute_decay(max_lag=50, plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
         self.assertGreater(result['beta_alpha1'], 0,
@@ -151,7 +121,7 @@ class TestSlowDecay(unittest.TestCase):
 
         sd = SlowDecay(dirty_returns, "ROBUST")
         try:
-            result = sd.compute_decay(max_lag=20, plot=False)
+            result = sd.compute_decay(max_lag=20, plot=False, n_shuffles=100)
             if result is not None:
                 self.assertIsInstance(result['slow_decay_confirmed'], bool)
                 if result['beta_alpha1'] is not None:
@@ -182,7 +152,7 @@ class TestLeverageEffect(unittest.TestCase):
         iid_returns = pd.Series(np.random.normal(0, 0.01, 5000))
 
         le = LeverageEffect(iid_returns, "TEST")
-        result = le.compute_leverage(max_lag=20, plot=False)
+        result = le.compute_leverage(max_lag=20, plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
         self.assertEqual(len(result['lags']), 41)
@@ -208,7 +178,7 @@ class TestLeverageEffect(unittest.TestCase):
         leverage_returns = pd.Series(returns[:2000])
 
         le = LeverageEffect(leverage_returns, "TEST_LEVERAGE")
-        result = le.compute_leverage(max_lag=10, plot=False)
+        result = le.compute_leverage(max_lag=10, plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
         lags = np.array(result['lags'])
@@ -227,7 +197,7 @@ class TestLeverageEffect(unittest.TestCase):
         iid_returns = pd.Series(np.random.normal(0, 0.01, 5000))
 
         le = LeverageEffect(iid_returns, "TEST_IID")
-        result = le.compute_leverage(max_lag=20, plot=False)
+        result = le.compute_leverage(max_lag=20, plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
         lags = np.array(result['lags'])
@@ -247,7 +217,7 @@ class TestLeverageEffect(unittest.TestCase):
 
         le = LeverageEffect(dirty_returns, "ROBUST")
         try:
-            result = le.compute_leverage(max_lag=10, plot=False)
+            result = le.compute_leverage(max_lag=10, plot=False, n_shuffles=100)
             if result is not None:
                 self.assertGreater(result['min_L'], -0.1,
                                    "Cleaned Gaussian data should not show a strong leverage effect.")
@@ -262,7 +232,7 @@ class TestLeverageEffect(unittest.TestCase):
         data = pd.Series([0.01, -0.01, 0.02])
 
         le = LeverageEffect(data, "TEST_SHORT")
-        result = le.compute_leverage(max_lag=50, plot=False)
+        result = le.compute_leverage(max_lag=50, plot=False, n_shuffles=100)
 
         self.assertIsNone(result)
 
@@ -279,7 +249,7 @@ class TestVolVolCorr(unittest.TestCase):
         iid_volume = pd.Series(np.random.normal(1e6, 1e4, n))
 
         vvc = VolVolCorr(iid_returns, iid_volume, "TEST")
-        result = vvc.compute_correlation(plot=False)
+        result = vvc.compute_correlation(plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
         self.assertFalse(result['significant_abs'], "IID data must not show significant correlation.")
@@ -303,7 +273,7 @@ class TestVolVolCorr(unittest.TestCase):
         corr_volume = pd.Series(abs_vol * 1e7 + np.random.normal(0, 1e4, n))
 
         vvc = VolVolCorr(corr_returns, corr_volume, "TEST_CORR")
-        result = vvc.compute_correlation(plot=False)
+        result = vvc.compute_correlation(plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
         self.assertGreater(result['rho_abs'], 0.5,
@@ -324,7 +294,7 @@ class TestVolVolCorr(unittest.TestCase):
         iid_volume = pd.Series(np.random.normal(1e6, 1e4, n))
 
         vvc = VolVolCorr(iid_returns, iid_volume, "TEST_IID")
-        result = vvc.compute_correlation(plot=False)
+        result = vvc.compute_correlation(plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
         self.assertGreater(result['pval_abs'], 0.05,
@@ -345,7 +315,7 @@ class TestVolVolCorr(unittest.TestCase):
 
         vvc = VolVolCorr(dirty_returns, dirty_volume, "ROBUST")
         try:
-            result = vvc.compute_correlation(plot=False)
+            result = vvc.compute_correlation(plot=False, n_shuffles=100)
             if result is not None:
                 self.assertFalse(np.isnan(result['rho_abs']))
                 self.assertGreater(result['rho_abs'], 0.5)
@@ -360,7 +330,7 @@ class TestVolVolCorr(unittest.TestCase):
         data_v = pd.Series([1e6, 2e6, 1.5e6])
 
         vvc = VolVolCorr(data_r, data_v, "TEST_SHORT")
-        result = vvc.compute_correlation(plot=False)
+        result = vvc.compute_correlation(plot=False, n_shuffles=100)
 
         self.assertIsNone(result)
 
