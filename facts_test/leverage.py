@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor
 
 
 class LeverageEffect:
@@ -10,12 +11,10 @@ class LeverageEffect:
         L(tau) = Corr(r_t, r²_{t+tau})   for tau in [-max_lag, max_lag]
 
     The leverage effect is present when L(tau) starts negative for small positive tau
-    and slowly decays toward zero. This captures the asymmetry: negative price moves
-    (crashes) predict higher future volatility more than positive moves do.
+    and slowly decays toward zero. Captures the asymmetry: negative price moves
+    predict higher future volatility more than positive moves do.
 
     Indicator: L(tau) < 0 for positive tau.
-
-    Data: log returns from data.py are used directly (no transformation needed).
     """
 
     def __init__(self, returns, ticker: str):
@@ -26,25 +25,49 @@ class LeverageEffect:
             self.returns = arr[np.isfinite(arr)]
         self.ticker = ticker
 
+    @staticmethod
+    def _eff_shuffles(n, n_shuffles):
+        """Scale down shuffle count for large n: null CI converges quickly."""
+        if n >= 200_000: return min(n_shuffles, 100)
+        if n >= 50_000:  return min(n_shuffles, 200)
+        if n >= 10_000:  return min(n_shuffles, 500)
+        return n_shuffles
+
+    def _cross_corr(self, x, y, max_lag):
+        """
+        Compute Corr(x_t, y_{t+tau}) for tau=1..max_lag using a single FFT pass.
+
+        Replaces a per-lag corrcoef loop (O(max_lag * n)) with O(n log n).
+        Uses global means/stds — approximation error is negligible for n >> max_lag.
+        """
+        n = len(x)
+        x_c = x - x.mean()
+        y_c = y - y.mean()
+        std_x = x.std(ddof=0)
+        std_y = y.std(ddof=0)
+        if std_x == 0 or std_y == 0:
+            return np.zeros(max_lag)
+        fft_len = 1 << (2 * n - 1).bit_length()
+        Fx = np.fft.rfft(x_c, n=fft_len)
+        Fy = np.fft.rfft(y_c, n=fft_len)
+        xcorr = np.fft.irfft(np.conj(Fx) * Fy, n=fft_len)
+        return xcorr[1:max_lag + 1] / (n * std_x * std_y)
+
     def _compute_null_L(self, max_lag, n_shuffles=1000):
         """
         Build a single flat null lower bound for L(τ) by shuffling returns.
 
-        Under the null (i.i.d. returns), L(τ) should be near zero.  We return
-        the 5th percentile of all null L values (across all shuffles and all
-        positive lags) — a single horizontal threshold.  If the observed L(τ)
-        falls below this line, it is very unlikely to be noise.
+        Uses FFT-based cross-correlation to compute all lags in one pass (O(n log n)
+        per shuffle) instead of a per-lag corrcoef loop (O(max_lag * n)).
+        Auto-scales n_shuffles for large datasets where the null CI converges quickly.
         """
         r = self.returns.copy()
-        null_L = np.empty((n_shuffles, max_lag))
-        for i in range(n_shuffles):
-            r_shuf = np.random.permutation(r)
-            r_sq_shuf = r_shuf ** 2
-            for tau_idx, tau in enumerate(range(1, max_lag + 1)):
-                r_t = r_shuf[:-tau]
-                r_sq_t = r_sq_shuf[tau:]
-                null_L[i, tau_idx] = np.corrcoef(r_t, r_sq_t)[0, 1]
-        # 5th percentile of all values = most negative plausible flat threshold
+        eff = self._eff_shuffles(len(r), n_shuffles)
+        def _one(seed):
+            s = np.random.default_rng(seed).permutation(r)
+            return self._cross_corr(s, s ** 2, max_lag)
+        with ThreadPoolExecutor() as ex:
+            null_L = np.array(list(ex.map(_one, range(eff))))
         return float(np.percentile(null_L, 5))
 
     def compute_leverage(self, max_lag=50, plot=True, n_shuffles=1000):
@@ -71,11 +94,9 @@ class LeverageEffect:
 
         for tau in lags:
             if tau > 0:
-                # L(tau) = Corr(r_t, r²_{t+tau}): pair r[0..n-tau-1] with r_sq[tau..n-1]
                 r_t = r[:-tau]
                 r_sq_t = r_sq[tau:]
             elif tau < 0:
-                # L(tau) = Corr(r_t, r²_{t+tau}) = Corr(r[|tau|..n-1], r_sq[0..n-|tau|-1])
                 abs_tau = -tau
                 r_t = r[abs_tau:]
                 r_sq_t = r_sq[:n - abs_tau]
@@ -93,10 +114,9 @@ class LeverageEffect:
 
         L_arr = np.array(L_values)
 
-        # Null lower bound: 1st pct of shuffled L at each positive lag
+        eff = self._eff_shuffles(len(self.returns), n_shuffles)
         null_lower = self._compute_null_L(max_lag, n_shuffles)
 
-        # Leverage detected: any positive-lag L falls below the flat null lower bound
         pos_mask = lags > 0
         pos_L = L_arr[pos_mask]
         finite_pos = pos_L[np.isfinite(pos_L)]
@@ -132,7 +152,7 @@ class LeverageEffect:
                 pass
 
         print(f"--- Leverage Effect Results: {self.ticker} ---")
-        print(f"Sample size: {len(self.returns)} | Null CI: 5th pct of {n_shuffles} shuffles")
+        print(f"Sample size: {len(self.returns)} | Null CI: 5th pct of {eff} shuffles")
         print(f"Lag range: [{-max_lag}, {max_lag}]")
         if np.isfinite(min_L):
             print(f"Min L(τ): {min_L:.4f} at τ={min_lag}")

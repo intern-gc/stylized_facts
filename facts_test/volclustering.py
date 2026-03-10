@@ -1,21 +1,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from statsmodels.tsa.stattools import acf
+from concurrent.futures import ThreadPoolExecutor
 
 
 class VolatilityClustering:
     """
-    Calculates C1(τ): the autocorrelation of absolute returns.
+    Calculates C1(τ) = corr(|r(t,Δt)|, |r(t+τ,Δt)|).
 
-    C1(τ) = corr(|r(t,Δt)|, |r(t+τ,Δt)|)
-
-    Positive C1(τ) at multiple lags indicates volatility clustering —
-    large moves tend to be followed by large moves.
-
-    Absolute returns are used instead of squared returns because:
-      - Only requires finite 2nd moment (vs 4th for r², 8th for its ACF variance)
-      - Robust to outliers — a single large move doesn't dominate
-      - Ding, Granger & Engle (1993) showed |r|^α maximises autocorrelation at α≈1
+    Absolute returns used instead of squared: requires only finite 2nd moment
+    (vs 4th for r²), robust to outliers, and Ding, Granger & Engle (1993)
+    showed |r|^α maximises autocorrelation at α≈1.
     """
 
     def __init__(self, returns: np.ndarray, ticker: str):
@@ -27,20 +22,23 @@ class VolatilityClustering:
         self.ticker = ticker
         self.abs_returns = np.abs(self.returns)
 
-    def _compute_null_ci(self, max_lag, n_shuffles=1000):
-        """
-        Build a single flat null CI threshold by shuffling returns n_shuffles times.
+    @staticmethod
+    def _eff_shuffles(n, n_shuffles):
+        """Scale down shuffle count for large n: null CI converges quickly."""
+        if n >= 200_000: return min(n_shuffles, 100)
+        if n >= 50_000:  return min(n_shuffles, 200)
+        if n >= 10_000:  return min(n_shuffles, 500)
+        return n_shuffles
 
-        For each shuffle we destroy temporal order (i.i.d. null), take absolute
-        value, and compute the ACF.  We return the 95th percentile of all
-        |ACF_null| values (across all shuffles and all lags) — a single
-        horizontal threshold that is easy to interpret on a bar chart.
-        """
-        null_acfs = np.empty((n_shuffles, max_lag))
+    def _compute_null_ci(self, max_lag, n_shuffles=1000):
+        """Permutation null CI. Shuffles run in parallel threads (numpy releases GIL for FFT)."""
+        eff = self._eff_shuffles(len(self.returns), n_shuffles)
         r = self.returns.copy()
-        for i in range(n_shuffles):
-            shuffled_abs = np.abs(np.random.permutation(r))
-            null_acfs[i] = acf(shuffled_abs, nlags=max_lag, fft=True)[1:]
+        def _one(seed):
+            return acf(np.abs(np.random.default_rng(seed).permutation(r)),
+                       nlags=max_lag, fft=True)[1:]
+        with ThreadPoolExecutor() as ex:
+            null_acfs = np.array(list(ex.map(_one, range(eff))))
         return float(np.percentile(np.abs(null_acfs), 95))
 
     def compute_c1(self, max_lag=40, plot=True, n_shuffles=1000):
@@ -58,17 +56,12 @@ class VolatilityClustering:
             return np.array([]), []
 
         try:
-            c1_values = acf(
-                self.abs_returns,
-                nlags=max_lag,   # compute ACF at lags 0, 1, ..., max_lag (returns max_lag+1 values)
-                fft=True,        # use FFT-based algorithm (Wiener-Khinchin theorem): O(n log n)
-                                 # instead of computing each lag individually at O(n²) cost.
-                                 # Equivalent result; much faster for large n or high max_lag.
-            )
+            c1_values = acf(self.abs_returns, nlags=max_lag, fft=True)
         except Exception as e:
             print(f"❌ Error calculating C1: {e}")
             return np.array([]), []
 
+        eff = self._eff_shuffles(len(self.returns), n_shuffles)
         null_ci = self._compute_null_ci(max_lag, n_shuffles)
         significant_lags = np.where(np.abs(c1_values[1:]) > null_ci)[0] + 1
 
@@ -90,7 +83,7 @@ class VolatilityClustering:
 
         n = len(self.abs_returns)
         print(f"--- Volatility Clustering Results: {self.ticker} ---")
-        print(f"Sample size (T): {n} | Null CI: 95th pct of {n_shuffles} shuffles")
+        print(f"Sample size (T): {n} | Null CI: 95th pct of {eff} shuffles")
 
         if len(significant_lags) > 0:
             print(f"✅ FACT CONFIRMED: Significant C1 at {len(significant_lags)} lags.")

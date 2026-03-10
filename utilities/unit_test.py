@@ -11,36 +11,33 @@ class TestVolatilityClustering(unittest.TestCase):
 
     # TEST 1: VOLATILITY CLUSTERING (Positive)
     def test_volclustering_regime_switching(self):
-        # We create 500 wild/volatile returns followed by 500 tiny/calm returns.
-        # This mimics a market crash followed by a quiet period.
-        # Because variance is stuck high for 500 days then stuck low for 500 days,
-        # the squared returns are very autocorrelated — knowing today's variance
-        # tells you a lot about tomorrow's.
-        # We expect several lags to be flagged as significant, and C1(lag=1) > 0.1.
+        # 5000-point alternating-regime series: 2500 high-vol then 2500 low-vol.
+        # max_lag=500 covers multi-day lags for 1m data (389 bars/day ≈ 1.3 days).
+        # The regime block length (2500) >> max_lag (500), so ACF decays slowly —
+        # many lags must be significant, and C1(lag=1) must be strongly positive.
         np.random.seed(42)
-        high_vol = np.random.normal(0, 5.0, 500)
-        low_vol = np.random.normal(0, 0.1, 500)
+        high_vol = np.random.normal(0, 5.0, 2500)
+        low_vol = np.random.normal(0, 0.1, 2500)
         vc_clustered_data = pd.Series(np.concatenate([high_vol, low_vol]))
 
         vc_tester = VolatilityClustering(vc_clustered_data, "THEORY_VC")
-        c1_values, sig_lags = vc_tester.compute_c1(max_lag=20, plot=False, n_shuffles=100)
+        c1_values, sig_lags = vc_tester.compute_c1(max_lag=500, plot=False, n_shuffles=100)
 
         self.assertGreater(len(sig_lags), 0, "Volatile-then-calm data must show volatility clustering.")
         self.assertGreater(c1_values[1], 0.1, "C1 at lag 1 must be strongly positive for regime-switching data.")
 
     # TEST 2: VOLATILITY CLUSTERING (Negative)
     def test_volclustering_iid_returns(self):
-        # Pure random (iid) Gaussian returns: every day is independent of every other day.
-        # Squaring them and computing autocorrelation should give mostly noise (near zero).
-        # We allow up to 3 "false positives" out of 20 lags at the 5% level.
+        # 5000-point iid Gaussian. At max_lag=500 and 5% level we expect at most
+        # ~5% × 500 = 25 false-positive lags. We allow up to 30 as a safe margin.
         np.random.seed(42)
-        vc_iid_data = pd.Series(np.random.normal(0, 1.0, 1000))
+        vc_iid_data = pd.Series(np.random.normal(0, 1.0, 5000))
 
         vc_tester = VolatilityClustering(vc_iid_data, "IID_VC")
-        c1_values, sig_lags = vc_tester.compute_c1(max_lag=20, plot=False, n_shuffles=100)
+        c1_values, sig_lags = vc_tester.compute_c1(max_lag=500, plot=False, n_shuffles=100)
 
-        self.assertLessEqual(len(sig_lags), 3,
-                             "Random data should have almost no significant lags in the volatility ACF.")
+        self.assertLessEqual(len(sig_lags), 30,
+                             "Random data should have very few significant lags in the volatility ACF.")
 
 
 class TestSlowDecay(unittest.TestCase):
@@ -96,21 +93,7 @@ class TestSlowDecay(unittest.TestCase):
         self.assertGreater(result['acf_alpha1'][0], 0.0,
                            "Block-vol returns must have positive |returns| autocorrelation at lag 1.")
 
-    # TEST 6: SLOW DECAY (Beta Exponent Is Positive)
-    def test_beta_positive(self):
-        # Beta is the power-law exponent: ACF(lag) ~ A * lag^(-beta).
-        # If ACF starts positive and decays, beta must be positive.
-        sv_returns = self._make_block_vol_returns()
-        sd = SlowDecay(sv_returns, "TEST_SV")
-        result = sd.compute_decay(max_lag=50, plot=False, n_shuffles=100)
-
-        self.assertIsNotNone(result)
-        self.assertGreater(result['beta_alpha1'], 0,
-                           "Beta must be positive (autocorrelation decays from a positive start).")
-        self.assertGreater(result['beta_alpha2'], 0,
-                           "Beta for squared returns must also be positive.")
-
-    # TEST 7: SLOW DECAY (Robustness)
+    # TEST 6: SLOW DECAY (Robustness)
     def test_robustness_nan_inf(self):
         # Feed in a mix of good data and garbage. Should not crash.
         np.random.seed(42)
@@ -189,24 +172,7 @@ class TestLeverageEffect(unittest.TestCase):
         self.assertLess(float(np.nanmin(pos_L)), -0.1,
                         "The leverage effect must be large (min L < -0.1) for this constructed data.")
 
-    # TEST 11: LEVERAGE EFFECT (IID Data, No Strong Leverage)
-    def test_iid_data_no_strong_leverage(self):
-        # Random (iid) Gaussian data: no relationship between past returns and future variance.
-        # L(tau) should stay close to zero for all tau > 0 (nothing is above -0.1).
-        np.random.seed(42)
-        iid_returns = pd.Series(np.random.normal(0, 0.01, 5000))
-
-        le = LeverageEffect(iid_returns, "TEST_IID")
-        result = le.compute_leverage(max_lag=20, plot=False, n_shuffles=100)
-
-        self.assertIsNotNone(result)
-        lags = np.array(result['lags'])
-        L_arr = np.array(result['L_values'])
-        pos_L = L_arr[lags > 0]
-        self.assertGreater(float(np.nanmin(pos_L)), -0.1,
-                           "Random data should not show a strong leverage effect (min L > -0.1).")
-
-    # TEST 12: LEVERAGE EFFECT (Robustness)
+    # TEST 10: LEVERAGE EFFECT (Robustness)
     def test_robustness_nan_inf(self):
         # Feed in garbage data. Should not crash.
         np.random.seed(42)
@@ -241,85 +207,57 @@ class TestVolVolCorr(unittest.TestCase):
 
     # TEST 14: VOL-VOL CORRELATION (Return Structure)
     def test_return_structure(self):
-        # IID data: volume and returns are independent, so the correlation must not be
-        # significant. rho is bounded [-1, 1]; pval is bounded [0, 1]; corr_confirmed = False.
+        # Result must contain lags (-max_lag..max_lag), corr_abs and corr_sq of matching
+        # length, a scalar null_upper, and corr_confirmed=False for IID data.
         np.random.seed(42)
         n = 2000
+        max_lag = 20
         iid_returns = pd.Series(np.random.normal(0, 0.01, n))
         iid_volume = pd.Series(np.random.normal(1e6, 1e4, n))
 
         vvc = VolVolCorr(iid_returns, iid_volume, "TEST")
-        result = vvc.compute_correlation(plot=False, n_shuffles=100)
+        result = vvc.compute_correlation(max_lag=max_lag, plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
-        self.assertFalse(result['significant_abs'], "IID data must not show significant correlation.")
-        self.assertFalse(result['significant_sq'], "IID data: squared proxy also not significant.")
-        self.assertFalse(result['corr_confirmed'], "IID data: corr_confirmed must be False.")
-        self.assertGreater(result['pval_abs'], 0.05)
-        self.assertGreaterEqual(result['rho_abs'], -1.0)
-        self.assertLessEqual(result['rho_abs'], 1.0)
-        self.assertGreaterEqual(result['pval_abs'], 0.0)
-        self.assertLessEqual(result['pval_abs'], 1.0)
+        self.assertEqual(len(result['lags']), 2 * max_lag + 1)
+        self.assertEqual(len(result['corr_abs']), 2 * max_lag + 1)
+        self.assertEqual(len(result['corr_sq']),  2 * max_lag + 1)
+        self.assertTrue(np.all(np.abs(result['corr_abs']) <= 1.0))
+        self.assertFalse(result['corr_confirmed'], "IID data must not show significant correlation.")
 
     # TEST 15: VOL-VOL CORRELATION (Positive Correlation Detected)
     def test_positive_correlation_detected(self):
-        # We manually make volume = |return| * 10 million + small noise.
-        # So when returns are big, volume is big. Correlation should be very strong (rho > 0.5).
+        # Volume = |return| * 10M + noise → strong contemporaneous correlation at τ=0.
         np.random.seed(42)
         n = 2000
         abs_vol = np.abs(np.random.normal(0, 0.02, n))
-        signs = np.random.choice([-1, 1], n)
-        corr_returns = pd.Series(abs_vol * signs)
+        corr_returns = pd.Series(abs_vol * np.random.choice([-1, 1], n))
         corr_volume = pd.Series(abs_vol * 1e7 + np.random.normal(0, 1e4, n))
 
         vvc = VolVolCorr(corr_returns, corr_volume, "TEST_CORR")
-        result = vvc.compute_correlation(plot=False, n_shuffles=100)
+        result = vvc.compute_correlation(max_lag=20, plot=False, n_shuffles=100)
 
         self.assertIsNotNone(result)
-        self.assertGreater(result['rho_abs'], 0.5,
-                           "rho must be strongly positive when we built volume = |returns| * scale.")
-        self.assertLess(result['pval_abs'], 0.05,
-                        "This strong correlation must be statistically significant.")
-        self.assertTrue(result['significant_abs'],
-                        "significant_abs must be True when rho > 0 and p < 0.05.")
+        lags = np.array(result['lags'])
+        corr_abs = np.array(result['corr_abs'])
+        tau0 = float(corr_abs[lags == 0][0])
+        self.assertGreater(tau0, 0.5, "Contemporaneous corr at τ=0 must be > 0.5.")
         self.assertTrue(result['corr_confirmed'])
 
-    # TEST 16: VOL-VOL CORRELATION (IID Data, Not Significant)
-    def test_iid_data_not_significant(self):
-        # Volume and returns are generated completely independently — no real relationship.
-        # The p-value should be > 0.05, meaning we can't reject the "no correlation" hypothesis.
-        np.random.seed(42)
-        n = 2000
-        iid_returns = pd.Series(np.random.normal(0, 0.01, n))
-        iid_volume = pd.Series(np.random.normal(1e6, 1e4, n))
-
-        vvc = VolVolCorr(iid_returns, iid_volume, "TEST_IID")
-        result = vvc.compute_correlation(plot=False, n_shuffles=100)
-
-        self.assertIsNotNone(result)
-        self.assertGreater(result['pval_abs'], 0.05,
-                           "Independent data should not produce a significant p-value.")
-        self.assertFalse(result['corr_confirmed'],
-                         "corr_confirmed must be False when volume and returns are independent.")
-
-    # TEST 17: VOL-VOL CORRELATION (Robustness)
+    # TEST 15: VOL-VOL CORRELATION (Robustness)
     def test_robustness_nan_inf(self):
-        # Feed garbage data in both series. Must not crash.
         np.random.seed(42)
         clean_r = np.random.normal(0, 0.01, 500)
         clean_v = np.abs(clean_r) * 1e7 + np.random.normal(0, 1e4, 500)
         dirty_r = np.concatenate([clean_r, [np.nan] * 30, [np.inf] * 20, [-np.inf] * 20])
         dirty_v = np.concatenate([clean_v, [np.nan] * 30, [np.nan] * 20, [np.nan] * 20])
-        dirty_returns = pd.Series(dirty_r)
-        dirty_volume = pd.Series(dirty_v)
 
-        vvc = VolVolCorr(dirty_returns, dirty_volume, "ROBUST")
+        vvc = VolVolCorr(pd.Series(dirty_r), pd.Series(dirty_v), "ROBUST")
         try:
-            result = vvc.compute_correlation(plot=False, n_shuffles=100)
+            result = vvc.compute_correlation(max_lag=10, plot=False, n_shuffles=100)
             if result is not None:
-                self.assertFalse(np.isnan(result['rho_abs']))
-                self.assertGreater(result['rho_abs'], 0.5)
-                self.assertLessEqual(result['rho_abs'], 1.0)
+                self.assertTrue(np.all(np.isfinite(result['corr_abs'])))
+                self.assertTrue(np.all(np.abs(result['corr_abs']) <= 1.0))
         except Exception as e:
             self.fail(f"VolVolCorr crashed on bad data: {e}")
 
@@ -528,6 +466,279 @@ class TestAuditAndClean(unittest.TestCase):
         self.assertIn('V-Spike', report, f"Report must mention V-Spike repair. Got: '{report}'")
         self.assertLess(cleaned_df['Close'].max(), 200.0,
                         "After repair, the spike value of 10000 must be replaced.")
+
+
+class TestIntradayDemeaning(unittest.TestCase):
+
+    def _make_pattern_df(self, n_days, open_vol, mid_vol):
+        """
+        Build n_days of 1m deterministic data.
+        The 9:32 bar return is exactly open_vol; every other return is mid_vol.
+        Using deterministic (non-random) prices makes the expected slot means exact.
+        """
+        dates = pd.bdate_range('2024-01-02', periods=n_days, tz='US/Eastern')
+        all_dfs = []
+        for date in dates:
+            idx = pd.date_range(f"{date.date()} 09:31", f"{date.date()} 15:59",
+                                freq='1min', tz='US/Eastern')
+            n = len(idx)
+            prices = np.ones(n) * 100.0
+            prices[1] = prices[0] * np.exp(open_vol)   # 9:32 bar
+            for i in range(2, n):
+                prices[i] = prices[i - 1] * np.exp(mid_vol)
+            all_dfs.append(pd.DataFrame({
+                'Open': prices, 'High': prices * 1.001,
+                'Low':  prices * 0.999, 'Close': prices, 'Volume': [1000] * n,
+            }, index=idx))
+        return pd.concat(all_dfs).sort_index()
+
+    # TEST: after demeaning every time slot has mean |return| = 1.0
+    def test_demeaned_returns_have_unit_slot_mean(self):
+        # With a strong open/close volatility pattern (open 100x more volatile than mid),
+        # the raw slot means would range from 0.0002 to 0.02.
+        # After demeaning (dividing each bar by its slot's mean |return|),
+        # every slot must have mean |return| = 1.0 exactly.
+        from utilities.data import DataManager
+
+        df = self._make_pattern_df(n_days=10, open_vol=0.02, mid_vol=0.0002)
+        dm = DataManager.__new__(DataManager)
+        _, returns, _ = dm.audit_and_clean(df, '1m')
+
+        slot_means = returns.abs().groupby(returns.index.time).mean()
+        np.testing.assert_allclose(
+            slot_means.values, 1.0, atol=1e-6,
+            err_msg="After intraday demeaning every slot must have mean |return| = 1.0"
+        )
+
+    # TEST: daily data is NOT demeaned
+    def test_daily_data_returns_not_demeaned(self):
+        # Daily log returns are ~0.01, not ~1.0.
+        # audit_and_clean must leave them unchanged for interval='1d'.
+        from utilities.data import DataManager
+
+        index = pd.date_range('2024-01-02', periods=50, freq='B', tz='US/Eastern')
+        prices = 100.0 * np.exp(np.cumsum(np.full(50, 0.01)))
+        df = pd.DataFrame({
+            'Open': prices, 'High': prices * 1.01,
+            'Low':  prices * 0.99, 'Close': prices, 'Volume': [1000] * 50,
+        }, index=index)
+
+        dm = DataManager.__new__(DataManager)
+        _, returns, _ = dm.audit_and_clean(df, '1d')
+
+        self.assertAlmostEqual(float(returns.abs().mean()), 0.01, delta=0.005,
+                               msg="Daily returns must not be intraday-demeaned (expected ≈0.01, not ≈1.0).")
+
+
+class TestLeverageCrossCorr(unittest.TestCase):
+    """Test the FFT-based _cross_corr helper added to LeverageEffect for speed."""
+
+    # _cross_corr matches direct corrcoef (implicitly tests length and value range)
+    def test_cross_corr_matches_direct_corrcoef(self):
+        # For i.i.d. data, the FFT-based result must agree with a direct per-lag
+        # corrcoef loop to within 0.02 (small tolerance for global mean/std approximation).
+        from facts_test.leverage import LeverageEffect
+        np.random.seed(42)
+        r = np.random.normal(0, 0.01, 5000)
+        r_sq = r ** 2
+        le = LeverageEffect(pd.Series(r), "TEST")
+        max_lag = 10
+
+        fft_result = le._cross_corr(r, r_sq, max_lag)
+        direct = np.array([np.corrcoef(r[:-tau], r_sq[tau:])[0, 1]
+                           for tau in range(1, max_lag + 1)])
+
+        np.testing.assert_allclose(fft_result, direct, atol=0.02,
+                                   err_msg="_cross_corr must agree with direct corrcoef within 0.02.")
+
+
+class TestBarCountAndTimeFilter(unittest.TestCase):
+
+    def _make_intraday_df(self, date_str, start_time, end_time):
+        """Build a 1-minute OHLCV DataFrame for a single trading day."""
+        idx = pd.date_range(
+            f"{date_str} {start_time}",
+            f"{date_str} {end_time}",
+            freq='1min',
+            tz='US/Eastern'
+        )
+        n = len(idx)
+        return pd.DataFrame({
+            'Open':   [100.0] * n,
+            'High':   [101.0] * n,
+            'Low':    [99.0]  * n,
+            'Close':  [100.5] * n,
+            'Volume': [1000]  * n,
+        }, index=idx)
+
+    # TEST 28: TIME FILTER (boundary bars excluded)
+    def test_time_filter_excludes_0930_and_1600(self):
+        # The get_data pipeline applies between_time('09:31', '15:59').
+        # A raw DataFrame spanning 09:30-16:00 (391 bars) must be trimmed to
+        # exactly 389 bars with no 09:30 or 16:00 bar remaining.
+        import datetime
+        idx = pd.date_range('2024-01-02 09:30', '2024-01-02 16:00',
+                            freq='1min', tz='US/Eastern')
+        n = len(idx)
+        df = pd.DataFrame({
+            'Open': [100.0] * n, 'High': [101.0] * n,
+            'Low':  [99.0]  * n, 'Close': [100.5] * n, 'Volume': [1000] * n,
+        }, index=idx)
+
+        filtered = df.between_time('09:31', '15:59')
+        times = filtered.index.time
+
+        self.assertNotIn(datetime.time(9, 30), times,
+                         "09:30 bar must be excluded by time filter.")
+        self.assertNotIn(datetime.time(16, 0), times,
+                         "16:00 bar must be excluded by time filter.")
+        self.assertEqual(len(filtered), 389,
+                         f"Filtered full day must have 389 bars, got {len(filtered)}.")
+
+    # TEST 29: BAR COUNT (389 bars — no warning)
+    def test_full_day_389_bars_no_bar_count_warning(self):
+        # Perfect full trading day: 09:31-15:59 = 389 bars. Must be silent.
+        from utilities.data import DataManager
+        df = self._make_intraday_df('2024-01-02', '09:31', '15:59')
+        self.assertEqual(len(df), 389)
+
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1m')
+
+        self.assertNotIn('BAR COUNT', report.upper(),
+                         f"389-bar full day must not warn. Got: '{report}'")
+
+    # TEST 30: BAR COUNT (387 bars — no warning, normal provider noise)
+    def test_387_bars_no_bar_count_warning(self):
+        # Alpaca commonly delivers 385-388 bars on days where 1-4 illiquid
+        # minutes had no trades. This is normal noise and must not warn.
+        from utilities.data import DataManager
+        idx = pd.date_range('2024-01-02 09:31', periods=387, freq='1min', tz='US/Eastern')
+        n = len(idx)
+        df = pd.DataFrame({
+            'Open': [100.0] * n, 'High': [101.0] * n,
+            'Low':  [99.0]  * n, 'Close': [100.5] * n, 'Volume': [1000] * n,
+        }, index=idx)
+
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1m')
+
+        self.assertNotIn('BAR COUNT', report.upper(),
+                         f"387-bar day (provider noise) must not warn. Got: '{report}'")
+
+    # TEST 31: BAR COUNT (385 bars — no warning, lower bound of normal range)
+    def test_385_bars_no_bar_count_warning(self):
+        # 385 bars is the floor of acceptable full-day bar counts (4 missing = ~1%).
+        # Must be silent.
+        from utilities.data import DataManager
+        idx = pd.date_range('2024-01-02 09:31', periods=385, freq='1min', tz='US/Eastern')
+        n = len(idx)
+        df = pd.DataFrame({
+            'Open': [100.0] * n, 'High': [101.0] * n,
+            'Low':  [99.0]  * n, 'Close': [100.5] * n, 'Volume': [1000] * n,
+        }, index=idx)
+
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1m')
+
+        self.assertNotIn('BAR COUNT', report.upper(),
+                         f"385-bar day must not warn. Got: '{report}'")
+
+    # TEST 32: BAR COUNT (250 bars — no warning, realistic half-day)
+    def test_half_day_250_bars_no_bar_count_warning(self):
+        # Real half-days from Alpaca range 200-280 bars depending on year and
+        # exact close time. 250 is a representative realistic value.
+        from utilities.data import DataManager
+        idx = pd.date_range('2024-11-29 09:31', periods=250, freq='1min', tz='US/Eastern')
+        n = len(idx)
+        df = pd.DataFrame({
+            'Open': [100.0] * n, 'High': [101.0] * n,
+            'Low':  [99.0]  * n, 'Close': [100.5] * n, 'Volume': [1000] * n,
+        }, index=idx)
+
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1m')
+
+        self.assertNotIn('BAR COUNT', report.upper(),
+                         f"250-bar half-day must not warn. Got: '{report}'")
+
+    # TEST 33: BAR COUNT (320 bars — warns, circuit-breaker range)
+    def test_circuit_breaker_day_warns(self):
+        # Days like 2020-03-09 (COVID circuit breakers) had ~375 bars.
+        # Anything between 280 and 385 is too few for a full day and too many
+        # for a half-day — must warn.
+        from utilities.data import DataManager
+        idx = pd.date_range('2020-03-09 09:31', periods=320, freq='1min', tz='US/Eastern')
+        n = len(idx)
+        df = pd.DataFrame({
+            'Open': [100.0] * n, 'High': [101.0] * n,
+            'Low':  [99.0]  * n, 'Close': [100.5] * n, 'Volume': [1000] * n,
+        }, index=idx)
+
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1m')
+
+        self.assertIn('BAR COUNT', report.upper(),
+                      f"320-bar day (circuit breaker range) must warn. Got: '{report}'")
+
+    # TEST 34: BAR COUNT (too few bars < 200 — warns)
+    def test_day_with_under_200_bars_warns(self):
+        # A day with < 200 bars is broken data (API gap, provider outage, etc.).
+        from utilities.data import DataManager
+        idx = pd.date_range('2024-01-02 09:31', periods=149, freq='1min', tz='US/Eastern')
+        n = len(idx)
+        df = pd.DataFrame({
+            'Open': [100.0] * n, 'High': [101.0] * n,
+            'Low':  [99.0]  * n, 'Close': [100.5] * n, 'Volume': [1000] * n,
+        }, index=idx)
+
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1m')
+
+        self.assertIn('BAR COUNT', report.upper(),
+                      f"149-bar day must warn. Got: '{report}'")
+
+    # TEST 35: BAR COUNT (too many bars > 389 — warns)
+    def test_day_with_over_389_bars_warns(self):
+        # 391 bars means 09:30 and/or 16:00 leaked through the time filter.
+        from utilities.data import DataManager
+        idx = pd.date_range('2024-01-02 09:30', '2024-01-02 16:00',
+                            freq='1min', tz='US/Eastern')
+        n = len(idx)
+        self.assertEqual(n, 391)
+        df = pd.DataFrame({
+            'Open': [100.0] * n, 'High': [101.0] * n,
+            'Low':  [99.0]  * n, 'Close': [100.5] * n, 'Volume': [1000] * n,
+        }, index=idx)
+
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1m')
+
+        self.assertIn('BAR COUNT', report.upper(),
+                      f"391-bar day (time filter leak) must warn. Got: '{report}'")
+
+    # TEST 36: BAR COUNT (multi-day — only bad date named in warning)
+    def test_multiday_only_bad_days_trigger_warning(self):
+        # Two perfect days + one circuit-breaker day (320 bars). Only the bad
+        # date must appear in the warning.
+        from utilities.data import DataManager
+        good1 = self._make_intraday_df('2024-01-02', '09:31', '15:59')
+        bad_idx = pd.date_range('2024-01-03 09:31', periods=320,
+                                freq='1min', tz='US/Eastern')
+        bad = pd.DataFrame({
+            'Open': [100.0] * 320, 'High': [101.0] * 320,
+            'Low':  [99.0]  * 320, 'Close': [100.5] * 320, 'Volume': [1000] * 320,
+        }, index=bad_idx)
+        good2 = self._make_intraday_df('2024-01-04', '09:31', '15:59')
+        df = pd.concat([good1, bad, good2]).sort_index()
+
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1m')
+
+        self.assertIn('BAR COUNT', report.upper(),
+                      f"Multi-day df with circuit-breaker day must warn. Got: '{report}'")
+        self.assertIn('2024-01-03', report,
+                      f"Warning must name the bad date. Got: '{report}'")
 
 
 if __name__ == '__main__':

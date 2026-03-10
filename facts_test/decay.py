@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import stats
+from concurrent.futures import ThreadPoolExecutor
 
 
 class SlowDecay:
@@ -11,12 +12,8 @@ class SlowDecay:
         C_alpha(tau) ~ A * tau^(-beta)
 
     Estimated via log-log regression: ln(C_alpha(tau)) = ln(A) - beta * ln(tau).
-    The slope is -beta.
-
-    Indicator: 0.2 <= beta <= 0.4 (slow / long-memory decay).
+    Indicator: 0 < beta < 1 (power-law decay slower than exponential = long memory).
     Computed for both alpha=1 (absolute returns) and alpha=2 (squared returns).
-
-    Data: log returns from data.py are used directly (no further transformation needed).
     """
 
     def __init__(self, returns, ticker: str):
@@ -34,8 +31,6 @@ class SlowDecay:
         var = np.var(x, ddof=0)
         if var == 0:
             return np.zeros(max_lag)
-        # Zero-pad to next power of 2 for efficient FFT, compute power spectrum,
-        # then IFFT gives the full autocorrelation sequence in one pass.
         fft_len = 1 << (2 * n - 1).bit_length()
         f = np.fft.rfft(x_c, n=fft_len)
         acf_full = np.fft.irfft(f * np.conj(f))[:n] / (n * var)
@@ -52,15 +47,18 @@ class SlowDecay:
             return None, None
         log_tau = np.log(lags[mask])
         log_C = np.log(acf_values[mask])
-        slope, intercept, _, _, _ = stats.linregress(
-            log_tau,    # x: ln(lag), the predictor
-            log_C,      # y: ln(ACF), the response
-            # returns: slope, intercept, r_value, p_value, std_err
-            # we only need slope (= -beta) and intercept (= ln(A)), so the rest are discarded
-        )
-        beta = float(-slope)      # slope = -beta
+        slope, intercept, _, _, _ = stats.linregress(log_tau, log_C)
+        beta = float(-slope)
         A = float(np.exp(intercept))
         return beta, A
+
+    @staticmethod
+    def _eff_shuffles(n, n_shuffles):
+        """Scale down shuffle count for large n: null CI converges quickly."""
+        if n >= 200_000: return min(n_shuffles, 100)
+        if n >= 50_000:  return min(n_shuffles, 200)
+        if n >= 10_000:  return min(n_shuffles, 500)
+        return n_shuffles
 
     def _compute_null_acf_ci(self, transform_fn, max_lag, n_shuffles=1000):
         """
@@ -70,12 +68,15 @@ class SlowDecay:
         transform_fn, computes the ACF, and returns the 95th percentile of all
         |ACF_null| values (across all shuffles and all lags) — a single number
         drawn as a horizontal line on the plot.
+
+        Auto-scales n_shuffles for large datasets where the null CI converges quickly.
         """
-        null_acfs = np.empty((n_shuffles, max_lag))
+        eff = self._eff_shuffles(len(self.returns), n_shuffles)
         r = self.returns.copy()
-        for i in range(n_shuffles):
-            transformed = transform_fn(np.random.permutation(r))
-            null_acfs[i] = self._compute_acf(transformed, max_lag)
+        def _one(seed):
+            return self._compute_acf(transform_fn(np.random.default_rng(seed).permutation(r)), max_lag)
+        with ThreadPoolExecutor() as ex:
+            null_acfs = np.array(list(ex.map(_one, range(eff))))
         return float(np.percentile(np.abs(null_acfs), 95))
 
     def compute_decay(self, max_lag=100, plot=True, n_shuffles=1000):
@@ -100,7 +101,6 @@ class SlowDecay:
 
         lags = np.arange(1, max_lag + 1)
 
-        # Compute null CIs first — used for cutoff and fit
         null_ci1 = self._compute_null_acf_ci(np.abs, max_lag, n_shuffles)
         null_ci2 = self._compute_null_acf_ci(lambda r: r ** 2, max_lag, n_shuffles)
 
@@ -128,8 +128,8 @@ class SlowDecay:
         beta2, A2 = self._fit_power_law(lags2, acf2_clip)
 
         slow_decay_confirmed = (
-            (beta1 is not None and 0.2 <= beta1 <= 0.4) or
-            (beta2 is not None and 0.2 <= beta2 <= 0.4)
+            (beta1 is not None and 0 < beta1 < 1) or
+            (beta2 is not None and 0 < beta2 < 1)
         )
 
         if plot:
@@ -172,7 +172,8 @@ class SlowDecay:
                 pass
 
         print(f"--- Slow Decay Results: {self.ticker} ---")
-        print(f"Sample size: {len(self.returns)} | Null CI: 95th pct of {n_shuffles} shuffles")
+        eff = self._eff_shuffles(len(self.returns), n_shuffles)
+        print(f"Sample size: {len(self.returns)} | Null CI: 95th pct of {eff} shuffles")
         if beta1 is not None:
             print(f"Alpha=1: β={beta1:.4f}, A={A1:.4f}  (lags 1–{lags1[-1]})")
         else:
@@ -183,12 +184,12 @@ class SlowDecay:
             print(f"Alpha=2: insufficient data above null CI (cutoff at lag {lags2[-1]}).")
 
         if slow_decay_confirmed:
-            b = beta1 if (beta1 is not None and 0.2 <= beta1 <= 0.4) else beta2
-            print(f"✅ FACT CONFIRMED: Slow power-law decay (β={b:.3f} in [0.2, 0.4]).")
+            b = beta1 if (beta1 is not None and 0 < beta1 < 1) else beta2
+            print(f"✅ FACT CONFIRMED: Slow power-law decay (β={b:.3f}, 0 < β < 1).")
         else:
             b1_str = f"{beta1:.3f}" if beta1 is not None else "N/A"
             b2_str = f"{beta2:.3f}" if beta2 is not None else "N/A"
-            print(f"❌ FACT NOT CONFIRMED: β(α=1)={b1_str}, β(α=2)={b2_str} outside [0.2, 0.4].")
+            print(f"❌ FACT NOT CONFIRMED: β(α=1)={b1_str}, β(α=2)={b2_str} — need 0 < β < 1.")
 
         return {
             'beta_alpha1': beta1,

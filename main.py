@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def run_analysis():
     # --- CONFIGURATION ---
-    ticker = "GLD"
+    ticker = "SPY"
     interval = "1d"  # Try "1m", "5m", "1h", or "1d"
 
     start_date = "2015-01-01"
@@ -34,7 +34,8 @@ def run_analysis():
 
     # FACT 1: Volatility Clustering
     vc_tester = VolatilityClustering(returns, ticker)
-    c1_values, vc_sig_lags = vc_tester.compute_c1(max_lag=40)
+    vc_max_lags = {'1m': 500, '5m': 300, '1h': 200, '1d': 100}
+    c1_values, vc_sig_lags = vc_tester.compute_c1(max_lag=vc_max_lags.get(interval, 100))
 
     # FACT 2: Slow Decay of Autocorrelation
     sd_tester = SlowDecay(returns, ticker)
@@ -49,7 +50,8 @@ def run_analysis():
     # FACT 4: Volume-Volatility Correlation
     volume = df['Volume']
     vvc_tester = VolVolCorr(returns, volume, ticker)
-    vvc_result = vvc_tester.compute_correlation()
+    vvc_max_lags = {'1m': 500, '5m': 300, '1h': 150, '1d': 150}
+    vvc_result = vvc_tester.compute_correlation(max_lag=vvc_max_lags.get(interval, 100))
 
     # --- STEP 3: FINAL REPORT CARD ---
     print("\n" + "=" * 40)
@@ -71,11 +73,15 @@ def run_analysis():
         if sd_result['slow_decay_confirmed']:
             print(f"✅ FACT 2 (Slow Decay): CONFIRMED (β(α=1)={b1_str}, β(α=2)={b2_str})")
         else:
-            print(f"❌ FACT 2 (Slow Decay): FAILED (β(α=1)={b1_str}, β(α=2)={b2_str}, outside [0.2,0.4])")
+            print(f"❌ FACT 2 (Slow Decay): FAILED (β(α=1)={b1_str}, β(α=2)={b2_str}, need 0 < β < 1)")
     else:
         print("⚠️ FACT 2 (Slow Decay): INCONCLUSIVE (Insufficient Data)")
 
     # Report Fact 3
+    if interval in ('1m', '5m'):
+        print(f"⚠️  FACT 3 (Leverage Effect): UNRELIABLE at {interval} — the leverage mechanism "
+              f"(debt/equity ratio changes) operates over days, not minutes. "
+              f"Results below are noise. Use 1h or 1d data for a meaningful test.")
     if le_result:
         min_L = le_result['min_L']
         min_lag = le_result['min_lag']
@@ -84,20 +90,22 @@ def run_analysis():
         else:
             print(f"❌ FACT 3 (Leverage Effect): NOT DETECTED (min L={min_L:.4f})")
     else:
-        print("⚠️ FACT 3 (Leverage Effect): INCONCLUSIVE (Insufficient Data)")
+        print("⚠️  FACT 3 (Leverage Effect): INCONCLUSIVE (Insufficient Data)")
 
     # Report Fact 4
     if vvc_result:
-        rho_a = vvc_result['rho_abs']
-        rho_s = vvc_result['rho_sq']
-        p_a = vvc_result['pval_abs']
-        p_s = vvc_result['pval_sq']
+        lags = np.array(vvc_result['lags'])
+        c_abs = np.array(vvc_result['corr_abs'])
+        c_sq  = np.array(vvc_result['corr_sq'])
+        c0_abs = float(c_abs[lags == 0][0])
+        c0_sq  = float(c_sq[lags == 0][0])
+        null   = vvc_result['null_upper']
         if vvc_result['corr_confirmed']:
             print(f"✅ FACT 4 (Vol-Vol Correlation): CONFIRMED "
-                  f"(ρ(|r|)={rho_a:.4f} p={p_a:.4f}, ρ(r²)={rho_s:.4f} p={p_s:.4f})")
+                  f"(C(0)|r|={c0_abs:.4f}, C(0)r²={c0_sq:.4f}, null={null:.4f})")
         else:
             print(f"❌ FACT 4 (Vol-Vol Correlation): NOT DETECTED "
-                  f"(ρ(|r|)={rho_a:.4f} p={p_a:.4f}, ρ(r²)={rho_s:.4f} p={p_s:.4f})")
+                  f"(C(0)|r|={c0_abs:.4f}, C(0)r²={c0_sq:.4f}, null={null:.4f})")
     else:
         print("⚠️ FACT 4 (Vol-Vol Correlation): INCONCLUSIVE (Insufficient Data)")
 

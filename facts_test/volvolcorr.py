@@ -1,164 +1,127 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import stats
+from concurrent.futures import ThreadPoolExecutor
 
 
 class VolVolCorr:
     """
-    Tests for Volume-Volatility Correlation (Stylized Fact 9):
-    Trading volume V_t is positively correlated with price volatility proxies.
+    Volume-Volatility Cross-Correlation (Stylized Fact):
+    C(τ) = Corr(V_t, |r_{t+τ}|) for τ in [-max_lag, max_lag].
 
-    Two volatility proxies are tested:
-        rho_abs = Corr(V_t, |r_t|)   -- absolute returns
-        rho_sq  = Corr(V_t, r_t^2)   -- squared returns
+    τ < 0: volatility predicts future volume.
+    τ = 0: contemporaneous relationship.
+    τ > 0: volume predicts future volatility.
 
-    Significance via Pearson t-test (one-sided, H1: rho > 0):
-        t = rho * sqrt(n - 2) / sqrt(1 - rho^2)
-        p = P(T_{n-2} >= t)
-
-    Indicator: rho > 0 and p < 0.05 for either proxy.
-
-    Data: log returns from data.py are used directly.
-    Volume comes from df['Volume'] (raw trade volume, no transformation needed).
+    Significance via permutation null (99th pct of shuffled cross-corr).
     """
 
     def __init__(self, returns, volume, ticker: str):
         r = np.asarray(returns).flatten().astype(float)
         v = np.asarray(volume).flatten().astype(float)
-
-        # Align lengths: truncate to shorter series
         min_len = min(len(r), len(v))
-        r = r[:min_len]
-        v = v[:min_len]
-
-        # Drop positions where either series is non-finite
+        r, v = r[:min_len], v[:min_len]
         mask = np.isfinite(r) & np.isfinite(v)
         self.returns = r[mask]
         self.volume = v[mask]
         self.ticker = ticker
 
-    def _pearson_t_test(self, x, y):
-        """
-        Compute Pearson correlation and one-sided t-test (H1: rho > 0).
+    @staticmethod
+    def _eff_shuffles(n, n_shuffles):
+        """Scale down shuffle count for large n: null CI converges quickly."""
+        if n >= 200_000: return min(n_shuffles, 100)
+        if n >= 50_000:  return min(n_shuffles, 200)
+        if n >= 10_000:  return min(n_shuffles, 500)
+        return n_shuffles
 
-        Returns (rho, t_stat, pval) or (nan, nan, nan) if degenerate.
-        t = rho * sqrt(n-2) / sqrt(1 - rho^2)
-        pval = P(T_{n-2} >= t)  [one-sided, right tail]
-        """
+    def _cross_corr(self, x, y, max_lag):
+        """Corr(x_t, y_{t+τ}) for τ=1..max_lag via FFT. O(n log n)."""
         n = len(x)
-        if n < 4:
-            return float('nan'), float('nan'), float('nan')
+        x_c, y_c = x - x.mean(), y - y.mean()
+        std_x, std_y = x.std(ddof=0), y.std(ddof=0)
+        if std_x == 0 or std_y == 0:
+            return np.zeros(max_lag)
+        fft_len = 1 << (2 * n - 1).bit_length()
+        Fx = np.fft.rfft(x_c, n=fft_len)
+        Fy = np.fft.rfft(y_c, n=fft_len)
+        xcorr = np.fft.irfft(np.conj(Fx) * Fy, n=fft_len)
+        return xcorr[1:max_lag + 1] / (n * std_x * std_y)
 
-        rho = float(np.corrcoef(x, y)[0, 1])
-        if not np.isfinite(rho) or abs(rho) >= 1.0:
-            return rho, float('nan'), float('nan')
+    def _full_cross_corr(self, x, y, max_lag):
+        """Corr(x_t, y_{t+τ}) for τ in [-max_lag, max_lag]."""
+        pos = self._cross_corr(x, y, max_lag)
+        neg = self._cross_corr(y, x, max_lag)
+        tau0 = float(np.corrcoef(x, y)[0, 1]) if (x.std() > 0 and y.std() > 0) else 0.0
+        return np.concatenate([neg[::-1], [tau0], pos])
 
-        t_stat = rho * np.sqrt(n - 2) / np.sqrt(1.0 - rho ** 2)
-        pval = float(stats.t.sf(
-            t_stat,   # the t-statistic to evaluate
-            df=n - 2, # degrees of freedom: n observations minus 2 estimated parameters (mean of x, mean of y)
-            # sf = survival function = 1 - CDF = P(T > t_stat): gives the one-sided right-tail p-value.
-            # We use one-sided because H1 is rho > 0 (positive correlation only).
-        ))
-        return rho, float(t_stat), pval
+    def _compute_null_ci(self, max_lag, n_shuffles):
+        """99th pct of |cross-corr| under i.i.d. null. Shuffles run in parallel threads."""
+        eff = self._eff_shuffles(len(self.returns), n_shuffles)
+        r, v = self.returns.copy(), self.volume
+        def _one(seed):
+            return self._full_cross_corr(v, np.abs(np.random.default_rng(seed).permutation(r)), max_lag)
+        with ThreadPoolExecutor() as ex:
+            null_vals = np.array(list(ex.map(_one, range(eff))))
+        return float(np.percentile(np.abs(null_vals), 99))
 
-    def _compute_null_rho(self, n_shuffles=1000):
+    def compute_correlation(self, max_lag=100, plot=True, n_shuffles=1000):
         """
-        Build null distributions for rho_abs and rho_sq by shuffling returns
-        n_shuffles times (volume is kept fixed, breaking the pairing).
-
-        Returns (threshold_abs, threshold_sq): 99th percentile of |rho_null|
-        for each proxy — the most extreme white-noise correlation expected.
-        """
-        null_abs = np.empty(n_shuffles)
-        null_sq = np.empty(n_shuffles)
-        r = self.returns.copy()
-        v = self.volume
-        for i in range(n_shuffles):
-            r_shuf = np.random.permutation(r)
-            null_abs[i] = np.corrcoef(v, np.abs(r_shuf))[0, 1]
-            null_sq[i] = np.corrcoef(v, r_shuf ** 2)[0, 1]
-        return (
-            float(np.percentile(np.abs(null_abs), 99)),
-            float(np.percentile(np.abs(null_sq), 99)),
-        )
-
-    def compute_correlation(self, plot=True, n_shuffles=1000):
-        """
-        Compute volume-volatility correlations for both |r| and r^2.
-
-        Returns dict with:
-          rho_abs, t_abs, pval_abs, significant_abs  : results for |r_t|
-          rho_sq,  t_sq,  pval_sq,  significant_sq   : results for r_t^2
-          corr_confirmed : bool, True if either proxy is positive and significant
+        Returns dict with lags, corr_abs, corr_sq, null_upper, corr_confirmed.
+        corr_confirmed = True if any lag >= 0 exceeds the null upper bound.
         Returns None if data is insufficient.
         """
         n = len(self.returns)
-        if n < 10:
-            print(f"  Insufficient data for volume-volatility correlation test.")
+        if n < max_lag * 2 + 10:
+            print("  Insufficient data for volume-volatility correlation test.")
             return None
 
         v = self.volume
-        abs_r = np.abs(self.returns)
-        sq_r = self.returns ** 2
+        abs_r, sq_r = np.abs(self.returns), self.returns ** 2
+        lags = np.arange(-max_lag, max_lag + 1)
 
-        rho_abs, t_abs, pval_abs = self._pearson_t_test(v, abs_r)
-        rho_sq, t_sq, pval_sq = self._pearson_t_test(v, sq_r)
+        corr_abs = self._full_cross_corr(v, abs_r, max_lag)
+        corr_sq  = self._full_cross_corr(v, sq_r,  max_lag)
+        null_upper = self._compute_null_ci(max_lag, n_shuffles)
 
-        null_thr_abs, null_thr_sq = self._compute_null_rho(n_shuffles)
-        sig_abs = bool(np.isfinite(rho_abs) and rho_abs > null_thr_abs)
-        sig_sq = bool(np.isfinite(rho_sq) and rho_sq > null_thr_sq)
-        corr_confirmed = sig_abs or sig_sq
+        nonneg_mask = lags >= 0
+        corr_confirmed = bool(np.any(corr_abs[nonneg_mask] > null_upper))
 
         if plot:
             try:
                 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-                ax = axes[0]
-                ax.scatter(abs_r, v, alpha=0.2, s=5, color='steelblue')
-                ax.set_xlabel("log scaled |r_t| (Absolute Returns)")
-                ax.set_ylabel("log scaled Volume V_t")
-                ax.set_xscale('log')
-                ax.set_yscale('log')
-                rho_str = f"{rho_abs:.4f}" if np.isfinite(rho_abs) else "N/A"
-                p_str = f"{pval_abs:.4f}" if np.isfinite(pval_abs) else "N/A"
-                ax.set_title(f"Vol vs |r|: {self.ticker}  (ρ={rho_str}, p={p_str})")
-
-                ax2 = axes[1]
-                ax2.scatter(sq_r, v, alpha=0.2, s=5, color='darkorange')
-                ax2.set_xlabel("log scaled r_t² (Squared Returns)")
-                ax2.set_ylabel("log scaled Volume V_t")
-                ax2.set_xscale('log')
-                ax2.set_yscale('log')
-                rho2_str = f"{rho_sq:.4f}" if np.isfinite(rho_sq) else "N/A"
-                p2_str = f"{pval_sq:.4f}" if np.isfinite(pval_sq) else "N/A"
-                ax2.set_title(f"Vol vs r²: {self.ticker}  (ρ={rho2_str}, p={p2_str})")
-
+                eff = self._eff_shuffles(n, n_shuffles)
+                for ax, corr, label in zip(axes,
+                                           [corr_abs, corr_sq],
+                                           ["|r|", "r²"]):
+                    ax.plot(lags, corr, color='steelblue', linewidth=1.0, label='C(τ)')
+                    ax.axhline(null_upper,  color='r', linestyle='--', linewidth=0.8,
+                               label=f'99% null CI ({eff} shuffles)')
+                    ax.axhline(-null_upper, color='r', linestyle='--', linewidth=0.8)
+                    ax.axhline(0, color='gray', linestyle='--', linewidth=0.5)
+                    ax.axvline(0, color='gray', linestyle='--', linewidth=0.5)
+                    ax.set_title(f"Vol-Vol C(τ) = Corr(V_t, {label}{{t+τ}}): {self.ticker}")
+                    ax.set_xlabel("Lag τ")
+                    ax.set_ylabel("C(τ)")
+                    ax.legend()
                 plt.tight_layout()
                 plt.show()
             except Exception:
                 pass
 
+        eff = self._eff_shuffles(n, n_shuffles)
         print(f"--- Volume-Volatility Correlation: {self.ticker} ---")
-        print(f"Sample size: {n} | Null CI: 99th pct of {n_shuffles} shuffles")
-        _fmt = lambda x: f"{x:.4f}" if np.isfinite(x) else "N/A"
-        print(f"|r|  proxy: ρ={_fmt(rho_abs)}, t={_fmt(t_abs)}, p={_fmt(pval_abs)} | null thr={null_thr_abs:.4f}")
-        print(f"r²   proxy: ρ={_fmt(rho_sq)},  t={_fmt(t_sq)},  p={_fmt(pval_sq)}  | null thr={null_thr_sq:.4f}")
+        print(f"Sample size: {n} | Null CI: 99th pct of {eff} shuffles")
+        _f = lambda x: f"{x:.4f}"
+        print(f"|r| proxy: C(0)={_f(corr_abs[lags == 0][0])}  max C(τ>0)={_f(corr_abs[lags > 0].max())} | null={_f(null_upper)}")
+        print(f"r²  proxy: C(0)={_f(corr_sq[lags == 0][0])}   max C(τ>0)={_f(corr_sq[lags > 0].max())} | null={_f(null_upper)}")
         if corr_confirmed:
-            print(f"✅ FACT CONFIRMED: Volume-volatility correlation is positive and significant.")
+            print("✅ FACT CONFIRMED: Volume-volatility correlation is positive and significant.")
         else:
-            print(f"❌ FACT NOT CONFIRMED: No significant positive correlation detected.")
+            print("❌ FACT NOT CONFIRMED: No significant positive correlation detected.")
 
         return {
-            'rho_abs': rho_abs,
-            't_abs': t_abs,
-            'pval_abs': pval_abs,
-            'null_thr_abs': null_thr_abs,
-            'significant_abs': sig_abs,
-            'rho_sq': rho_sq,
-            't_sq': t_sq,
-            'pval_sq': pval_sq,
-            'null_thr_sq': null_thr_sq,
-            'significant_sq': sig_sq,
+            'lags':           lags.tolist(),
+            'corr_abs':       corr_abs.tolist(),
+            'corr_sq':        corr_sq.tolist(),
+            'null_upper':     null_upper,
             'corr_confirmed': corr_confirmed,
         }

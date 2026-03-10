@@ -34,7 +34,6 @@ class DataManager:
 
         needed_files = {day: f"{day.strftime('%y%m%d')}_{interval}_{ticker}.pkl" for day in business_days}
 
-        # If force_resync is True, we ignore existing files
         if force_resync:
             print(f"  🔄 FORCE RESYNC: Ignoring cache for {ticker}...")
             missing_days = list(business_days)
@@ -52,12 +51,8 @@ class DataManager:
                 timeframe=self._get_alpaca_tf(interval),
                 start=datetime.combine(fetch_start, time(0, 0)),
                 end=datetime.combine(fetch_end, time(23, 59)),
-                feed="sip",        # Securities Information Processor: the consolidated tape aggregating
-                                   # quotes from all US exchanges. More complete than "iex" (IEX-only)
-                                   # or "otc". Requires a funded Alpaca account.
-                adjustment='split' # adjust historical prices for stock splits so that the price
-                                   # series is continuous. Without this, a 2-for-1 split would show
-                                   # a -50% return on split day, which is not a real return.
+                feed="sip",
+                adjustment='split'
             )
 
             try:
@@ -77,8 +72,6 @@ class DataManager:
                         group.to_pickle(os.path.join(self.cache_dir, day_fname))
                         days_received.add(day_ts)
 
-                # Only mark as empty if we actually got a successful response from the API
-                # and that specific day was simply not in the result.
                 for m_day in missing_days:
                     if m_day.date() not in days_received:
                         empty_fname = f"{m_day.strftime('%y%m%d')}_{interval}_{ticker}.pkl"
@@ -88,7 +81,6 @@ class DataManager:
             except Exception as e:
                 print(f"  ❌ API ERROR: {e}. Not marking days as empty.")
 
-        # Parallel load
         def load_pkl(day):
             fpath = os.path.join(self.cache_dir, needed_files[day])
             if os.path.exists(fpath):
@@ -112,7 +104,7 @@ class DataManager:
         full_df = pd.concat(stitched_dfs).sort_index()
         if full_df.index.tz is None: full_df.index = full_df.index.tz_localize('UTC')
         full_df = full_df.tz_convert('US/Eastern')
-        if interval != '1d': full_df = full_df.between_time('09:30', '16:00')
+        if interval != '1d': full_df = full_df.between_time('09:31', '15:59')
         full_df = full_df[~full_df.index.duplicated(keep='first')]
 
         return self.audit_and_clean(full_df, interval)
@@ -126,14 +118,12 @@ class DataManager:
         warnings = []
 
         # --- 1. NaN VALUES ---
-        # Check for missing OHLCV values and forward-fill them.
         nan_count = c_df[['Open', 'High', 'Low', 'Close', 'Volume']].isna().sum().sum()
         if nan_count > 0:
             c_df = c_df.ffill()
             issues.append(f"REPAIRED: {nan_count} NaN values (forward-filled)")
 
         # --- 2. NEGATIVE PRICES ---
-        # A stock price below zero is physically impossible. Drop those rows entirely.
         neg_mask = (c_df[['Open', 'High', 'Low', 'Close']] < 0).any(axis=1)
         n_neg = neg_mask.sum()
         if n_neg > 0:
@@ -141,7 +131,6 @@ class DataManager:
             issues.append(f"DROPPED: {n_neg} rows with negative prices")
 
         # --- 3. ZERO CLOSE PRICE ---
-        # A close price of exactly 0 is almost always a data error. Drop those rows.
         zero_close_mask = c_df['Close'] == 0
         n_zero_close = zero_close_mask.sum()
         if n_zero_close > 0:
@@ -149,8 +138,6 @@ class DataManager:
             issues.append(f"DROPPED: {n_zero_close} rows with zero close price")
 
         # --- 4. OHLC CONSISTENCY ---
-        # High must be >= Low, and Close must sit inside [Low, High].
-        # Violating these means the bar is corrupted.
         ohlc_bad = (
             (c_df['High'] < c_df['Low']) |
             (c_df['Close'] > c_df['High']) |
@@ -162,19 +149,15 @@ class DataManager:
             issues.append(f"DROPPED: {n_ohlc_bad} rows with broken OHLC (High < Low or Close out of range)")
 
         # --- 5. ZERO VOLUME ---
-        # Zero volume on an active trading bar is suspicious — could be a stale/phantom bar.
-        # We warn but keep the data since it may be valid (halted trading, etc.).
+        # Zero volume on an active bar may be valid (halted trading), so warn but keep.
         zero_vol_mask = c_df['Volume'] == 0
         n_zero_vol = zero_vol_mask.sum()
         if n_zero_vol > 0:
             warnings.append(f"WARNING: {n_zero_vol} bars with zero volume (kept — verify manually)")
 
         # --- 6. V-SPIKE DETECTION (intraday only) ---
-        # A V-spike is a bar that shoots way up (or down) then immediately reverses.
-        # Pattern: |r_t| >> 5σ AND r_t + r_{t+1} ≈ 0 (meaning it reversed next bar).
-        # Only relevant for high-frequency data — daily bars don't get V-spikes.
-        # Uses global shift so bar_idx maps correctly to c_df.iloc positions.
-        # Overnight gaps won't be flagged as spikes because they don't immediately reverse.
+        # Pattern: |r_t| >> 5σ AND r_t + r_{t+1} ≈ 0 (immediate reversal).
+        # Overnight gaps won't be flagged because they don't immediately reverse.
         if interval in ['1m', '5m'] and len(c_df) > 10:
             _global_ret = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
             std = _global_ret.std()
@@ -192,11 +175,24 @@ class DataManager:
                     c_df = c_df.ffill()
                     issues.append(f"REPAIRED: {len(spike_idx)} V-Spikes")
 
-        # --- 7. COMPUTE LOG RETURNS ---
-        # Daily: close-to-close overnight return is the standard convention.
-        # Intraday: compute within each trading day only. A global shift(1) across
-        # the stitched DataFrame would include the overnight gap (last bar of day N
-        # → first bar of day N+1), injecting large spurious outliers into the series.
+        # --- 7. BAR COUNT PER DAY (intraday only) ---
+        # Acceptable ranges for 1-minute bars after the 09:31-15:59 time filter:
+        #   385-389: full trading day  |  200-280: half-day (NYSE early close)
+        # Outside both ranges signals circuit-breaker halts, API gaps, or filter leakage.
+        bar_count_warnings = []
+        if interval == '1m':
+            for day, group in c_df.groupby(c_df.index.date):
+                n_bars = len(group)
+                full_day_ok = 385 <= n_bars <= 389
+                half_day_ok = 200 <= n_bars <= 280
+                if not (full_day_ok or half_day_ok):
+                    bar_count_warnings.append(
+                        f"BAR COUNT WARNING: {day} has {n_bars} bars (expected 385-389 or 200-280)"
+                    )
+
+        # --- 8. COMPUTE LOG RETURNS ---
+        # Intraday: compute within each trading day to avoid injecting the overnight
+        # gap (last bar of day N → first bar of day N+1) as a spurious return.
         if interval == '1d':
             returns = np.log(c_df['Close'] / c_df['Close'].shift(1)).dropna()
         else:
@@ -206,9 +202,20 @@ class DataManager:
                     day_rets.append(np.log(group['Close'] / group['Close'].shift(1)).dropna())
             returns = pd.concat(day_rets).sort_index() if day_rets else pd.Series(dtype=float)
 
-        # --- BUILD REPORT ---
-        # Always show counts for every check so you can see at a glance what was found,
-        # even when nothing was wrong (e.g. "NaNs: 0 | Neg prices: 0 | ...").
+        # --- 9. INTRADAY SEASONALITY REMOVAL (1m only) ---
+        # 1-minute returns have a U-shaped intraday volatility pattern that creates
+        # spurious ACF periodicity at multiples of ~389 bars. Normalise each return
+        # by its time-of-day mean absolute return: ε_t = r_t / σ_{s(t)}, where
+        # σ_s = mean(|r|) for minute-of-day slot s (Andersen & Bollerslev 1997).
+        if interval == '1m' and not returns.empty:
+            times = np.array([dt.time() for dt in returns.index])
+            abs_r = np.abs(returns.values)
+            unique_times, inverse = np.unique(times, return_inverse=True)
+            slot_means = np.array([abs_r[inverse == i].mean()
+                                   for i in range(len(unique_times))])
+            divisors = np.where(slot_means[inverse] > 0, slot_means[inverse], 1.0)
+            returns = pd.Series(returns.values / divisors, index=returns.index)
+
         summary = (
             f"NaNs: {nan_count} | "
             f"Neg prices: {n_neg} | "
@@ -216,8 +223,9 @@ class DataManager:
             f"Bad OHLC: {n_ohlc_bad} | "
             f"Zero vol: {n_zero_vol}"
         )
-        if issues or warnings:
-            report = " | ".join(issues + warnings) + f" [{summary}]"
+        all_warnings = warnings + bar_count_warnings
+        if issues or all_warnings:
+            report = " | ".join(issues + all_warnings) + f" [{summary}]"
         else:
             report = f"✅ DATA CLEAN [{summary}]"
         return c_df, returns, report
