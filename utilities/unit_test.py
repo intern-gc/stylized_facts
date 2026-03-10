@@ -644,12 +644,12 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
         self.assertNotIn('BAR COUNT', report.upper(),
                          f"385-bar day must not warn. Got: '{report}'")
 
-    # TEST 32: BAR COUNT (250 bars — no warning, realistic half-day)
-    def test_half_day_250_bars_no_bar_count_warning(self):
-        # Real half-days from Alpaca range 200-280 bars depending on year and
-        # exact close time. 250 is a representative realistic value.
+    # TEST 32: BAR COUNT (209 bars — no warning, proper half-day after 13:00 trim)
+    def test_half_day_209_bars_no_bar_count_warning(self):
+        # Post-2010 NYSE half-days close at 13:00 ET. After the 09:31 strict lower bound
+        # and < 13:00 upper bound, the window is 09:31-12:59 = exactly 209 bars.
         from utilities.data import DataManager
-        idx = pd.date_range('2024-11-29 09:31', periods=250, freq='1min', tz='US/Eastern')
+        idx = pd.date_range('2024-11-29 09:31', periods=209, freq='1min', tz='US/Eastern')
         n = len(idx)
         df = pd.DataFrame({
             'Open': [100.0] * n, 'High': [101.0] * n,
@@ -660,13 +660,13 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
         _, _, report = dm.audit_and_clean(df, '1m')
 
         self.assertNotIn('BAR COUNT', report.upper(),
-                         f"250-bar half-day must not warn. Got: '{report}'")
+                         f"209-bar half-day must not warn. Got: '{report}'")
 
-    # TEST 33: BAR COUNT (320 bars — warns, circuit-breaker range)
-    def test_circuit_breaker_day_warns(self):
-        # Days like 2020-03-09 (COVID circuit breakers) had ~375 bars.
-        # Anything between 280 and 385 is too few for a full day and too many
-        # for a half-day — must warn.
+    # TEST 33: BAR COUNT (320 bars on a known halt day — emits HALT WARNING)
+    def test_circuit_breaker_day_emits_halt_warning(self):
+        # 2020-03-09 is a known Level-1 circuit breaker day. Real data has ~375 bars
+        # (15-min halt). 320 bars is pathologically low even for a halt day and must
+        # still warn, but as a HALT WARNING rather than a generic BAR COUNT WARNING.
         from utilities.data import DataManager
         idx = pd.date_range('2020-03-09 09:31', periods=320, freq='1min', tz='US/Eastern')
         n = len(idx)
@@ -678,8 +678,8 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
         dm = DataManager.__new__(DataManager)
         _, _, report = dm.audit_and_clean(df, '1m')
 
-        self.assertIn('BAR COUNT', report.upper(),
-                      f"320-bar day (circuit breaker range) must warn. Got: '{report}'")
+        self.assertIn('HALT', report.upper(),
+                      f"320-bar known halt day must produce a HALT WARNING. Got: '{report}'")
 
     # TEST 34: BAR COUNT (too few bars < 200 — warns)
     def test_day_with_under_200_bars_warns(self):
@@ -739,6 +739,76 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
                       f"Multi-day df with circuit-breaker day must warn. Got: '{report}'")
         self.assertIn('2024-01-03', report,
                       f"Warning must name the bad date. Got: '{report}'")
+
+
+class TestBarCount5mAnd1h(unittest.TestCase):
+
+    def _make_df(self, date_str, start_time, freq, n_bars):
+        idx = pd.date_range(f"{date_str} {start_time}", periods=n_bars,
+                            freq=freq, tz='US/Eastern')
+        return pd.DataFrame({
+            'Open': [100.0] * n_bars, 'High': [101.0] * n_bars,
+            'Low':  [99.0]  * n_bars, 'Close': [100.5] * n_bars,
+            'Volume': [1000] * n_bars,
+        }, index=idx)
+
+    # 5m full day: 9:35–15:55 = 77 bars → silent
+    def test_5m_full_day_77_bars_no_warning(self):
+        from utilities.data import DataManager
+        df = self._make_df('2024-01-02', '09:35', '5min', 77)
+        self.assertEqual(len(df), 77)
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '5m')
+        self.assertNotIn('BAR COUNT', report.upper(),
+                         f"77-bar 5m day must not warn. Got: '{report}'")
+
+    # 5m broken day → warns
+    def test_5m_broken_day_warns(self):
+        from utilities.data import DataManager
+        df = self._make_df('2024-01-02', '09:35', '5min', 30)
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '5m')
+        self.assertIn('BAR COUNT', report.upper(),
+                      f"30-bar 5m day must warn. Got: '{report}'")
+
+    # 5m half-day: 9:35–12:55 = 41 bars → silent
+    def test_5m_half_day_41_bars_no_warning(self):
+        from utilities.data import DataManager
+        df = self._make_df('2024-11-29', '09:35', '5min', 41)
+        self.assertEqual(len(df), 41)
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '5m')
+        self.assertNotIn('BAR COUNT', report.upper(),
+                         f"41-bar 5m half-day must not warn. Got: '{report}'")
+
+    # 1h full day: 10:30–15:30 = 6 bars → silent
+    def test_1h_full_day_6_bars_no_warning(self):
+        from utilities.data import DataManager
+        df = self._make_df('2024-01-02', '10:30', '1h', 6)
+        self.assertEqual(len(df), 6)
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1h')
+        self.assertNotIn('BAR COUNT', report.upper(),
+                         f"6-bar 1h day must not warn. Got: '{report}'")
+
+    # 1h broken day (1 bar) → warns
+    def test_1h_broken_day_warns(self):
+        from utilities.data import DataManager
+        df = self._make_df('2024-01-02', '10:30', '1h', 1)
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1h')
+        self.assertIn('BAR COUNT', report.upper(),
+                      f"1-bar 1h day must warn. Got: '{report}'")
+
+    # 1h half-day: 3 bars → silent
+    def test_1h_half_day_3_bars_no_warning(self):
+        from utilities.data import DataManager
+        df = self._make_df('2024-11-29', '10:30', '1h', 3)
+        self.assertEqual(len(df), 3)
+        dm = DataManager.__new__(DataManager)
+        _, _, report = dm.audit_and_clean(df, '1h')
+        self.assertNotIn('BAR COUNT', report.upper(),
+                         f"3-bar 1h half-day must not warn. Got: '{report}'")
 
 
 if __name__ == '__main__':

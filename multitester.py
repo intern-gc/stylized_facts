@@ -34,7 +34,7 @@ TICKERS = [
     "DIS", "NFLX",                 # Media & Entertainment
     "KO", "PG", "VNQ"              # Consumer Staples & Real Estate ETF
 ]
-INTERVALS   = ["1m", "1h", "1d"]
+INTERVALS   = ["1d"]
 START_DATE  = "2015-01-01"
 END_DATE    = "2025-01-01"
 OUTPUT_FILE = "multitester_results.xlsx"
@@ -84,7 +84,7 @@ def fact2(returns, ticker, interval):
         return 'INCONCLUSIVE'
     if r['slow_decay_confirmed']:
         b1, b2 = r['beta_alpha1'], r['beta_alpha2']
-        b = b1 if (b1 is not None and 0.2 <= b1 <= 0.4) else b2
+        b = b1 if (b1 is not None and 0 < b1 < 1) else b2
         return f"CONFIRMED (Beta={b:.3f})"
     b1, b2 = r['beta_alpha1'], r['beta_alpha2']
     b = b1 if b1 is not None else b2
@@ -112,12 +112,11 @@ def fact4(returns, volume, ticker):
         r = t.compute_correlation(plot=False)
     if r is None:
         return 'INCONCLUSIVE'
+    lags = np.array(r['lags'])
+    c0 = float(np.array(r['corr_abs'])[lags == 0][0])
     if r['corr_confirmed']:
-        rho = r['rho_abs'] if np.isfinite(r['rho_abs']) else r['rho_sq']
-        return f"CONFIRMED (rho={rho:.2f})"
-    rho = r['rho_abs']
-    rho_str = f"{rho:.2f}" if np.isfinite(rho) else 'N/A'
-    return f"NOT DETECTED (rho={rho_str})"
+        return f"CONFIRMED (C(0)={c0:.3f})"
+    return f"NOT DETECTED (C(0)={c0:.3f})"
 
 
 # ── MAIN RUNNER ───────────────────────────────────────────────────────────────

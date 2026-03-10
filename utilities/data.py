@@ -2,14 +2,23 @@ import os
 import pandas as pd
 import numpy as np
 import concurrent.futures
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date
 from dotenv import load_dotenv
+import exchange_calendars as xcals
 
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 load_dotenv()
+
+# Level-1 circuit breaker halt days (March 2020): legitimate trading days with a
+# ~15-minute regulatory halt. Bar counts will be ~374-380 instead of 385-389.
+# Flagged with a specific warning rather than a generic bar-count anomaly.
+_KNOWN_HALT_DAYS = {
+    date(2020, 3, 9), date(2020, 3, 12),
+    date(2020, 3, 16), date(2020, 3, 18),
+}
 
 
 class DataManager:
@@ -25,6 +34,59 @@ class DataManager:
         mapping = {'1m': TimeFrame.Minute, '5m': TimeFrame(5, TimeFrame.Minute), '1h': TimeFrame.Hour,
                    '1d': TimeFrame.Day}
         return mapping.get(interval, TimeFrame.Minute)
+
+    def _build_rth_bounds(self, start_date, end_date):
+        """
+        Call exchange_calendars ONCE per get_data invocation to build:
+          - trading_days : set of date objects for valid NYSE sessions
+          - early_closes : dict {date: close_time} for sessions ending before 16:00 ET
+
+        DST is handled automatically: the calendar returns tz-aware UTC close times
+        which we convert to US/Eastern, so the resulting time() objects are always
+        correct local-time regardless of EST vs EDT.
+        """
+        nyse = xcals.get_calendar('NYSE')
+        sessions = nyse.sessions_in_range(
+            pd.Timestamp(start_date), pd.Timestamp(end_date)
+        )
+        trading_days = set(s.date() for s in sessions)
+        early_closes = {}
+        for session in sessions:
+            close_et = nyse.session_close(session).tz_convert('US/Eastern')
+            if close_et.time() != time(16, 0):
+                early_closes[session.date()] = close_et.time()
+        return trading_days, early_closes
+
+    def _apply_rth_filter(self, df, trading_days, early_closes):
+        """
+        Vectorized RTH filter. df.index must already be in US/Eastern.
+
+        Normal days  : keep 09:31–15:59  → max 389 bars → max 388 log returns
+        Early-close  : keep 09:31–(close_time - 1 min), e.g. 09:31–12:59 for a
+                       13:00 close → max 209 bars → max 208 log returns
+
+        Filtering >= 09:31 strictly excludes the open-auction bar (09:30), making
+        390 bars structurally impossible.
+        """
+        idx_dates = np.array(df.index.date)
+        idx_times = np.array(df.index.time)
+
+        # Drop non-trading days (weekends, NYSE holidays)
+        trading_mask = np.array([d in trading_days for d in idx_dates])
+
+        # Standard RTH window — strict lower bound excludes the 09:30 open-auction bar
+        time_mask = (idx_times >= time(9, 31)) & (idx_times <= time(15, 59))
+
+        # Tighten upper bound for early-close days
+        for ec_date, ec_time in early_closes.items():
+            day_mask = idx_dates == ec_date
+            if day_mask.any():
+                time_mask[day_mask] = (
+                    (idx_times[day_mask] >= time(9, 31)) &
+                    (idx_times[day_mask] < ec_time)
+                )
+
+        return df[trading_mask & time_mask]
 
     def get_data(self, ticker, start_date, end_date, interval, force_resync=False):
         yesterday = (datetime.now() - timedelta(days=1)).date()
@@ -102,9 +164,12 @@ class DataManager:
             )
 
         full_df = pd.concat(stitched_dfs).sort_index()
-        if full_df.index.tz is None: full_df.index = full_df.index.tz_localize('UTC')
+        if full_df.index.tz is None:
+            full_df.index = full_df.index.tz_localize('UTC')
         full_df = full_df.tz_convert('US/Eastern')
-        if interval != '1d': full_df = full_df.between_time('09:31', '15:59')
+        if interval != '1d':
+            trading_days, early_closes = self._build_rth_bounds(req_start, req_end)
+            full_df = self._apply_rth_filter(full_df, trading_days, early_closes)
         full_df = full_df[~full_df.index.duplicated(keep='first')]
 
         return self.audit_and_clean(full_df, interval)
@@ -176,18 +241,38 @@ class DataManager:
                     issues.append(f"REPAIRED: {len(spike_idx)} V-Spikes")
 
         # --- 7. BAR COUNT PER DAY (intraday only) ---
-        # Acceptable ranges for 1-minute bars after the 09:31-15:59 time filter:
-        #   385-389: full trading day  |  200-280: half-day (NYSE early close)
-        # Outside both ranges signals circuit-breaker halts, API gaps, or filter leakage.
+        # After the 09:31 strict lower bound, 390 bars is structurally impossible.
+        # Bar counts and max log returns per day:
+        #   1m full  : 9:31–15:59 → 389 bars max → 388 log returns max
+        #   1m half  : 9:31–12:59 → 209 bars max → 208 log returns max  (13:00 close, post-2010)
+        #   5m full  : 9:35–15:55 → 77  bars max → 76  log returns max
+        #   5m half  : 9:35–12:55 → 41  bars max → 40  log returns max
+        #   1h full  : 10:30–15:30 → 6  bars max → 5   log returns max
+        #   1h half  : 10:30–12:30 → 3  bars max → 2   log returns max
+        _BAR_RANGES = {
+            '1m': {'full': (385, 389), 'half': (205, 209)},
+            '5m': {'full': (74,  77),  'half': (38,  41)},
+            '1h': {'full': (5,   6),   'half': (2,   3)},
+        }
+        # Circuit-breaker halt days: ~15-min halt → ~374 bars. Flag specifically.
+        _HALT_MIN_BARS = {'1m': 370, '5m': 68, '1h': 4}
+
         bar_count_warnings = []
-        if interval == '1m':
+        if interval in _BAR_RANGES:
+            full_lo, full_hi = _BAR_RANGES[interval]['full']
+            half_lo, half_hi = _BAR_RANGES[interval]['half']
             for day, group in c_df.groupby(c_df.index.date):
                 n_bars = len(group)
-                full_day_ok = 385 <= n_bars <= 389
-                half_day_ok = 200 <= n_bars <= 280
-                if not (full_day_ok or half_day_ok):
+                if day in _KNOWN_HALT_DAYS:
+                    halt_min = _HALT_MIN_BARS.get(interval, 0)
+                    if n_bars < halt_min:
+                        bar_count_warnings.append(
+                            f"HALT WARNING: {day} has {n_bars} bars (circuit breaker — expected ≥{halt_min})"
+                        )
+                elif not (full_lo <= n_bars <= full_hi or half_lo <= n_bars <= half_hi):
                     bar_count_warnings.append(
-                        f"BAR COUNT WARNING: {day} has {n_bars} bars (expected 385-389 or 200-280)"
+                        f"BAR COUNT WARNING: {day} has {n_bars} bars "
+                        f"(expected {full_lo}-{full_hi} full or {half_lo}-{half_hi} half-day)"
                     )
 
         # --- 8. COMPUTE LOG RETURNS ---

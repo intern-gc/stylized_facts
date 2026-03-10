@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 from concurrent.futures import ThreadPoolExecutor
+_WORKERS = max(1, (os.cpu_count() or 4) // 2)
 
 
 class VolVolCorr:
@@ -28,7 +30,8 @@ class VolVolCorr:
     @staticmethod
     def _eff_shuffles(n, n_shuffles):
         """Scale down shuffle count for large n: null CI converges quickly."""
-        if n >= 200_000: return min(n_shuffles, 100)
+        if n >= 500_000: return min(n_shuffles, 20)
+        if n >= 200_000: return min(n_shuffles, 50)
         if n >= 50_000:  return min(n_shuffles, 200)
         if n >= 10_000:  return min(n_shuffles, 500)
         return n_shuffles
@@ -59,7 +62,7 @@ class VolVolCorr:
         r, v = self.returns.copy(), self.volume
         def _one(seed):
             return self._full_cross_corr(v, np.abs(np.random.default_rng(seed).permutation(r)), max_lag)
-        with ThreadPoolExecutor() as ex:
+        with ThreadPoolExecutor(max_workers=_WORKERS) as ex:
             null_vals = np.array(list(ex.map(_one, range(eff))))
         return float(np.percentile(np.abs(null_vals), 99))
 
