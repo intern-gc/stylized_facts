@@ -66,7 +66,7 @@ class VolVolCorr:
             null_vals = np.array(list(ex.map(_one, range(eff))))
         return float(np.percentile(np.abs(null_vals), 99))
 
-    def compute_correlation(self, max_lag=100, plot=True, n_shuffles=1000):
+    def compute_correlation(self, max_lag=1500, plot=True, n_shuffles=1000):
         """
         Returns dict with lags, corr_abs, corr_sq, null_upper, corr_confirmed.
         corr_confirmed = True if any lag >= 0 exceeds the null upper bound.

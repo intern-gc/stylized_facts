@@ -44,7 +44,7 @@ class VolatilityClustering:
             null_acfs = np.array(list(ex.map(_one, range(eff))))
         return float(np.percentile(np.abs(null_acfs), 95))
 
-    def compute_c1(self, max_lag=40, plot=True, n_shuffles=1000):
+    def compute_c1(self, max_lag=100, plot=True, n_shuffles=1000):
         """
         Compute C1(τ) for τ = 1, ..., max_lag.
 

@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import concurrent.futures
-from datetime import datetime, timedelta, time, date
+from datetime import datetime, timedelta, time
 from dotenv import load_dotenv
 import exchange_calendars as xcals
 
@@ -11,15 +11,6 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 load_dotenv()
-
-# Level-1 circuit breaker halt days (March 2020): legitimate trading days with a
-# ~15-minute regulatory halt. Bar counts will be ~374-380 instead of 385-389.
-# Flagged with a specific warning rather than a generic bar-count anomaly.
-_KNOWN_HALT_DAYS = {
-    date(2020, 3, 9), date(2020, 3, 12),
-    date(2020, 3, 16), date(2020, 3, 18),
-}
-
 
 class DataManager:
     def __init__(self, cache_dir="financial_cache"):
@@ -250,30 +241,24 @@ class DataManager:
         #   1h full  : 10:30–15:30 → 6  bars max → 5   log returns max
         #   1h half  : 10:30–12:30 → 3  bars max → 2   log returns max
         _BAR_RANGES = {
-            '1m': {'full': (385, 389), 'half': (205, 209)},
-            '5m': {'full': (74,  77),  'half': (38,  41)},
-            '1h': {'full': (5,   6),   'half': (2,   3)},
+            '1m': {'full': (370, 389), 'half': (207, 209)},
+            '5m': {'full': (75,  77),  'half': (40,  41)},
+            '1h': {'full': (6,   6),   'half': (3,   3)},
         }
-        # Circuit-breaker halt days: ~15-min halt → ~374 bars. Flag specifically.
-        _HALT_MIN_BARS = {'1m': 370, '5m': 68, '1h': 4}
-
-        bar_count_warnings = []
+        days_to_drop = []
         if interval in _BAR_RANGES:
             full_lo, full_hi = _BAR_RANGES[interval]['full']
             half_lo, half_hi = _BAR_RANGES[interval]['half']
             for day, group in c_df.groupby(c_df.index.date):
                 n_bars = len(group)
-                if day in _KNOWN_HALT_DAYS:
-                    halt_min = _HALT_MIN_BARS.get(interval, 0)
-                    if n_bars < halt_min:
-                        bar_count_warnings.append(
-                            f"HALT WARNING: {day} has {n_bars} bars (circuit breaker — expected ≥{halt_min})"
-                        )
-                elif not (full_lo <= n_bars <= full_hi or half_lo <= n_bars <= half_hi):
-                    bar_count_warnings.append(
-                        f"BAR COUNT WARNING: {day} has {n_bars} bars "
-                        f"(expected {full_lo}-{full_hi} full or {half_lo}-{half_hi} half-day)"
-                    )
+                if not (full_lo <= n_bars <= full_hi or half_lo <= n_bars <= half_hi):
+                    days_to_drop.append((day, n_bars))
+
+        if days_to_drop:
+            drop_set = {d for d, _ in days_to_drop}
+            c_df = c_df[~np.array([d in drop_set for d in c_df.index.date])]
+            drop_summary = ', '.join(f'{d} ({n} bars)' for d, n in days_to_drop)
+            issues.append(f"DROPPED: {drop_summary}")
 
         # --- 8. COMPUTE LOG RETURNS ---
         # Intraday: compute within each trading day to avoid injecting the overnight
@@ -308,9 +293,8 @@ class DataManager:
             f"Bad OHLC: {n_ohlc_bad} | "
             f"Zero vol: {n_zero_vol}"
         )
-        all_warnings = warnings + bar_count_warnings
-        if issues or all_warnings:
-            report = " | ".join(issues + all_warnings) + f" [{summary}]"
+        if issues or warnings:
+            report = " | ".join(issues + warnings) + f" [{summary}]"
         else:
             report = f"✅ DATA CLEAN [{summary}]"
         return c_df, returns, report

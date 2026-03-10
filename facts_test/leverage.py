@@ -8,9 +8,9 @@ _WORKERS = max(1, (os.cpu_count() or 4) // 2)
 class LeverageEffect:
     """
     Tests for Leverage Effect (Stylized Fact 8):
-    Measures the cross-correlation between returns and future squared returns:
+    Measures the cross-correlation between returns and future absolute returns:
 
-        L(tau) = Corr(r_t, r²_{t+tau})   for tau in [-max_lag, max_lag]
+        L(tau) = Corr(r_t, |r_{t+tau}|)   for tau in [-max_lag, max_lag]
 
     The leverage effect is present when L(tau) starts negative for small positive tau
     and slowly decays toward zero. Captures the asymmetry: negative price moves
@@ -68,14 +68,14 @@ class LeverageEffect:
         eff = self._eff_shuffles(len(r), n_shuffles)
         def _one(seed):
             s = np.random.default_rng(seed).permutation(r)
-            return self._cross_corr(s, s ** 2, max_lag)
+            return self._cross_corr(s, np.abs(s), max_lag)
         with ThreadPoolExecutor(max_workers=_WORKERS) as ex:
             null_L = np.array(list(ex.map(_one, range(eff))))
         return float(np.percentile(null_L, 5))
 
     def compute_leverage(self, max_lag=50, plot=True, n_shuffles=1000):
         """
-        Compute L(tau) = Corr(r_t, r²_{t+tau}) for tau = -max_lag .. +max_lag.
+        Compute L(tau) = Corr(r_t, |r_{t+tau}|) for tau = -max_lag .. +max_lag.
 
         Returns dict with:
           lags             : list of integers from -max_lag to +max_lag
@@ -91,21 +91,21 @@ class LeverageEffect:
             return None
 
         r = self.returns
-        r_sq = r ** 2
+        r_abs = np.abs(r)
         lags = np.arange(-max_lag, max_lag + 1)
         L_values = []
 
         for tau in lags:
             if tau > 0:
                 r_t = r[:-tau]
-                r_sq_t = r_sq[tau:]
+                r_sq_t = r_abs[tau:]
             elif tau < 0:
                 abs_tau = -tau
                 r_t = r[abs_tau:]
-                r_sq_t = r_sq[:n - abs_tau]
+                r_sq_t = r_abs[:n - abs_tau]
             else:
                 r_t = r
-                r_sq_t = r_sq
+                r_sq_t = r_abs
 
             if len(r_t) < 10:
                 L_values.append(float('nan'))
@@ -145,7 +145,7 @@ class LeverageEffect:
                            label=f'5% null lower bound (n={n_shuffles})')
                 ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
                 ax.axvline(0, color='gray', linestyle='--', linewidth=0.8)
-                ax.set_title(f"Leverage Effect L(τ) = Corr(r_t, r²_{{t+τ}}): {self.ticker}")
+                ax.set_title(f"Leverage Effect L(τ) = Corr(r_t, |r_{{t+τ}}|): {self.ticker}")
                 ax.set_xlabel("Lag τ")
                 ax.set_ylabel("L(τ)")
                 ax.legend()

@@ -444,14 +444,17 @@ class TestAuditAndClean(unittest.TestCase):
     # TEST 27: AUDIT AND CLEAN (V-Spike Repaired for Intraday Data)
     def test_vspike_repaired_intraday(self):
         # A V-spike is a bar that shoots to a crazy price then immediately snaps back.
-        # With 200 normal bars, std is tiny and log(10000/100) = 4.6 >> 5 * std.
+        # Use exactly 389 bars (valid full-day range) so the day isn't dropped by
+        # the bar count check. The spike is in the middle of the session.
         from utilities.data import DataManager
-        n_normal = 100
         normal_price = 100.0
         spike_price = 10000.0
-        normal_closes = [normal_price] * n_normal + [spike_price, normal_price] + [normal_price] * n_normal
+        # 194 normal + spike + recovery + 193 normal = 389 bars
+        normal_closes = ([normal_price] * 194 + [spike_price, normal_price] +
+                         [normal_price] * 193)
         n_total = len(normal_closes)
-        idx = pd.date_range('2024-01-02 09:30', periods=n_total, freq='1min', tz='US/Eastern')
+        assert n_total == 389
+        idx = pd.date_range('2024-01-02 09:31', periods=n_total, freq='1min', tz='US/Eastern')
         df = pd.DataFrame({
             'Open':   normal_closes,
             'High':   [c + 0.5 for c in normal_closes],
@@ -540,12 +543,11 @@ class TestLeverageCrossCorr(unittest.TestCase):
         from facts_test.leverage import LeverageEffect
         np.random.seed(42)
         r = np.random.normal(0, 0.01, 5000)
-        r_sq = r ** 2
         le = LeverageEffect(pd.Series(r), "TEST")
         max_lag = 10
 
-        fft_result = le._cross_corr(r, r_sq, max_lag)
-        direct = np.array([np.corrcoef(r[:-tau], r_sq[tau:])[0, 1]
+        fft_result = le._cross_corr(r, np.abs(r), max_lag)
+        direct = np.array([np.corrcoef(r[:-tau], np.abs(r)[tau:])[0, 1]
                            for tau in range(1, max_lag + 1)])
 
         np.testing.assert_allclose(fft_result, direct, atol=0.02,
@@ -626,10 +628,10 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
         self.assertNotIn('BAR COUNT', report.upper(),
                          f"387-bar day (provider noise) must not warn. Got: '{report}'")
 
-    # TEST 31: BAR COUNT (385 bars — no warning, lower bound of normal range)
+    # TEST 31: BAR COUNT (385 bars — no warning, within normal range)
     def test_385_bars_no_bar_count_warning(self):
-        # 385 bars is the floor of acceptable full-day bar counts (4 missing = ~1%).
-        # Must be silent.
+        # 383 bars is the floor of acceptable full-day bar counts (6 missing = ~1.5%).
+        # 385 is well within range and must be silent.
         from utilities.data import DataManager
         idx = pd.date_range('2024-01-02 09:31', periods=385, freq='1min', tz='US/Eastern')
         n = len(idx)
@@ -662,13 +664,12 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
         self.assertNotIn('BAR COUNT', report.upper(),
                          f"209-bar half-day must not warn. Got: '{report}'")
 
-    # TEST 33: BAR COUNT (320 bars on a known halt day — emits HALT WARNING)
-    def test_circuit_breaker_day_emits_halt_warning(self):
-        # 2020-03-09 is a known Level-1 circuit breaker day. Real data has ~375 bars
-        # (15-min halt). 320 bars is pathologically low even for a halt day and must
-        # still warn, but as a HALT WARNING rather than a generic BAR COUNT WARNING.
+    # TEST 33: BAR COUNT (320 bars on any day — dropped and reported)
+    def test_low_bar_day_is_dropped(self):
+        # Any day outside the acceptable range is dropped and reported,
+        # regardless of the reason (outage, halt, etc.). No pre-defined exemptions.
         from utilities.data import DataManager
-        idx = pd.date_range('2020-03-09 09:31', periods=320, freq='1min', tz='US/Eastern')
+        idx = pd.date_range('2024-01-02 09:31', periods=320, freq='1min', tz='US/Eastern')
         n = len(idx)
         df = pd.DataFrame({
             'Open': [100.0] * n, 'High': [101.0] * n,
@@ -676,16 +677,20 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
         }, index=idx)
 
         dm = DataManager.__new__(DataManager)
-        _, _, report = dm.audit_and_clean(df, '1m')
+        cleaned_df, _, report = dm.audit_and_clean(df, '1m')
 
-        self.assertIn('HALT', report.upper(),
-                      f"320-bar known halt day must produce a HALT WARNING. Got: '{report}'")
+        self.assertIn('DROPPED', report,
+                      f"320-bar day must be dropped. Got: '{report}'")
+        self.assertIn('2024-01-02', report,
+                      f"Report must name the dropped date. Got: '{report}'")
+        self.assertEqual(len(cleaned_df), 0,
+                         "All rows for the bad day must be removed.")
 
-    # TEST 34: BAR COUNT (too few bars < 200 — warns)
-    def test_day_with_under_200_bars_warns(self):
-        # A day with < 200 bars is broken data (API gap, provider outage, etc.).
+    # TEST 34: BAR COUNT (74 bars — dropped and reported)
+    def test_day_with_74_bars_is_dropped(self):
+        # A day with 74 bars (e.g. API gap) is outside any valid range — drop it.
         from utilities.data import DataManager
-        idx = pd.date_range('2024-01-02 09:31', periods=149, freq='1min', tz='US/Eastern')
+        idx = pd.date_range('2024-01-02 09:31', periods=74, freq='1min', tz='US/Eastern')
         n = len(idx)
         df = pd.DataFrame({
             'Open': [100.0] * n, 'High': [101.0] * n,
@@ -693,13 +698,15 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
         }, index=idx)
 
         dm = DataManager.__new__(DataManager)
-        _, _, report = dm.audit_and_clean(df, '1m')
+        cleaned_df, _, report = dm.audit_and_clean(df, '1m')
 
-        self.assertIn('BAR COUNT', report.upper(),
-                      f"149-bar day must warn. Got: '{report}'")
+        self.assertIn('DROPPED', report,
+                      f"74-bar day must be dropped. Got: '{report}'")
+        self.assertEqual(len(cleaned_df), 0,
+                         "All rows for the bad day must be removed.")
 
-    # TEST 35: BAR COUNT (too many bars > 389 — warns)
-    def test_day_with_over_389_bars_warns(self):
+    # TEST 35: BAR COUNT (391 bars — dropped, time filter leak)
+    def test_day_with_over_389_bars_is_dropped(self):
         # 391 bars means 09:30 and/or 16:00 leaked through the time filter.
         from utilities.data import DataManager
         idx = pd.date_range('2024-01-02 09:30', '2024-01-02 16:00',
@@ -712,15 +719,15 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
         }, index=idx)
 
         dm = DataManager.__new__(DataManager)
-        _, _, report = dm.audit_and_clean(df, '1m')
+        cleaned_df, _, report = dm.audit_and_clean(df, '1m')
 
-        self.assertIn('BAR COUNT', report.upper(),
-                      f"391-bar day (time filter leak) must warn. Got: '{report}'")
+        self.assertIn('DROPPED', report,
+                      f"391-bar day must be dropped. Got: '{report}'")
 
-    # TEST 36: BAR COUNT (multi-day — only bad date named in warning)
-    def test_multiday_only_bad_days_trigger_warning(self):
-        # Two perfect days + one circuit-breaker day (320 bars). Only the bad
-        # date must appear in the warning.
+    # TEST 36: BAR COUNT (multi-day — only bad date dropped and named)
+    def test_multiday_only_bad_days_are_dropped(self):
+        # Two perfect days + one bad day (320 bars). Only the bad date must be
+        # dropped; the good days must remain intact.
         from utilities.data import DataManager
         good1 = self._make_intraday_df('2024-01-02', '09:31', '15:59')
         bad_idx = pd.date_range('2024-01-03 09:31', periods=320,
@@ -733,12 +740,14 @@ class TestBarCountAndTimeFilter(unittest.TestCase):
         df = pd.concat([good1, bad, good2]).sort_index()
 
         dm = DataManager.__new__(DataManager)
-        _, _, report = dm.audit_and_clean(df, '1m')
+        cleaned_df, _, report = dm.audit_and_clean(df, '1m')
 
-        self.assertIn('BAR COUNT', report.upper(),
-                      f"Multi-day df with circuit-breaker day must warn. Got: '{report}'")
+        self.assertIn('DROPPED', report,
+                      f"Multi-day df with bad day must report drop. Got: '{report}'")
         self.assertIn('2024-01-03', report,
-                      f"Warning must name the bad date. Got: '{report}'")
+                      f"Report must name the dropped date. Got: '{report}'")
+        self.assertEqual(len(cleaned_df), 389 * 2,
+                         "Only the two good days (389 bars each) must remain.")
 
 
 class TestBarCount5mAnd1h(unittest.TestCase):
@@ -759,17 +768,17 @@ class TestBarCount5mAnd1h(unittest.TestCase):
         self.assertEqual(len(df), 77)
         dm = DataManager.__new__(DataManager)
         _, _, report = dm.audit_and_clean(df, '5m')
-        self.assertNotIn('BAR COUNT', report.upper(),
-                         f"77-bar 5m day must not warn. Got: '{report}'")
+        self.assertNotIn('DROPPED', report,
+                         f"77-bar 5m day must not be dropped. Got: '{report}'")
 
-    # 5m broken day → warns
-    def test_5m_broken_day_warns(self):
+    # 5m broken day → dropped
+    def test_5m_broken_day_is_dropped(self):
         from utilities.data import DataManager
         df = self._make_df('2024-01-02', '09:35', '5min', 30)
         dm = DataManager.__new__(DataManager)
         _, _, report = dm.audit_and_clean(df, '5m')
-        self.assertIn('BAR COUNT', report.upper(),
-                      f"30-bar 5m day must warn. Got: '{report}'")
+        self.assertIn('DROPPED', report,
+                      f"30-bar 5m day must be dropped. Got: '{report}'")
 
     # 5m half-day: 9:35–12:55 = 41 bars → silent
     def test_5m_half_day_41_bars_no_warning(self):
@@ -778,8 +787,8 @@ class TestBarCount5mAnd1h(unittest.TestCase):
         self.assertEqual(len(df), 41)
         dm = DataManager.__new__(DataManager)
         _, _, report = dm.audit_and_clean(df, '5m')
-        self.assertNotIn('BAR COUNT', report.upper(),
-                         f"41-bar 5m half-day must not warn. Got: '{report}'")
+        self.assertNotIn('DROPPED', report,
+                         f"41-bar 5m half-day must not be dropped. Got: '{report}'")
 
     # 1h full day: 10:30–15:30 = 6 bars → silent
     def test_1h_full_day_6_bars_no_warning(self):
@@ -788,17 +797,17 @@ class TestBarCount5mAnd1h(unittest.TestCase):
         self.assertEqual(len(df), 6)
         dm = DataManager.__new__(DataManager)
         _, _, report = dm.audit_and_clean(df, '1h')
-        self.assertNotIn('BAR COUNT', report.upper(),
-                         f"6-bar 1h day must not warn. Got: '{report}'")
+        self.assertNotIn('DROPPED', report,
+                         f"6-bar 1h day must not be dropped. Got: '{report}'")
 
-    # 1h broken day (1 bar) → warns
-    def test_1h_broken_day_warns(self):
+    # 1h broken day (1 bar) → dropped
+    def test_1h_broken_day_is_dropped(self):
         from utilities.data import DataManager
         df = self._make_df('2024-01-02', '10:30', '1h', 1)
         dm = DataManager.__new__(DataManager)
         _, _, report = dm.audit_and_clean(df, '1h')
-        self.assertIn('BAR COUNT', report.upper(),
-                      f"1-bar 1h day must warn. Got: '{report}'")
+        self.assertIn('DROPPED', report,
+                      f"1-bar 1h day must be dropped. Got: '{report}'")
 
     # 1h half-day: 3 bars → silent
     def test_1h_half_day_3_bars_no_warning(self):
